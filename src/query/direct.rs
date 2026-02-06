@@ -154,16 +154,24 @@ pub fn apply_filters(
     column_mapping: &std::collections::HashMap<String, usize>,
 ) -> bool {
     for filter in filters {
-        if let Some(&col_idx) = column_mapping.get(&filter.column) {
-            if let Some(value) = row.values.get(col_idx) {
+        let col_idx = if let Some(&idx) = column_mapping.get(&filter.column) {
+            Some(idx)
+        } else if filter.column.starts_with("col") {
+            filter.column[3..].parse::<usize>().ok()
+        } else {
+            None
+        };
+
+        if let Some(idx) = col_idx {
+            if let Some(value) = row.values.get(idx) {
                 if !filter.matches(value) {
                     return false;
                 }
             } else {
-                return false; // Column doesn't exist in row
+                return false; // Column index out of bounds for row
             }
         } else {
-            return false; // Column doesn't exist in mapping
+            return false; // Column doesn't exist in mapping and not a valid colN
         }
     }
 

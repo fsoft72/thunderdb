@@ -612,7 +612,7 @@ mod tests {
     fn test_btree_scan_from_to() {
         let mut tree = BTree::new(5).unwrap();
         for i in vec![10, 20, 30, 40, 50] {
-            tree.insert(i, i);
+            tree.insert(i, i).unwrap();
         }
 
         // scan_from(25) -> 30, 40, 50
