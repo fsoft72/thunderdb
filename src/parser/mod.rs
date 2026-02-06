@@ -11,3 +11,5 @@ pub mod executor;
 pub use token::{Token, Tokenizer};
 pub use ast::*;
 pub use parser::{Parser, parse_sql};
+pub use validator::{Validator, validate_statement};
+pub use executor::Executor;
