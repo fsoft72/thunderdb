@@ -344,10 +344,9 @@ mod tests {
         let entries = df.scan_all().unwrap();
         assert_eq!(entries.len(), 5);
 
-        for (i, (offset, length, row_id, deleted)) in entries.iter().enumerate() {
+        for (i, (_offset, length, row_id, deleted)) in entries.iter().enumerate() {
             assert_eq!(*row_id, (i + 1) as u64);
             assert!(!deleted);
-            assert!(*offset >= 0);
             assert!(*length > 0);
         }
 

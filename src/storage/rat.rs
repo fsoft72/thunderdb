@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use std::fs::File;
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Entry in the Record Address Table

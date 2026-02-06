@@ -71,7 +71,6 @@ fn validate_config(config: &DatabaseConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_default_config() {

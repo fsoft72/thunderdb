@@ -1,5 +1,5 @@
 use crate::config::StorageConfig;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::storage::{DataFile, RecordAddressTable, Row, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
