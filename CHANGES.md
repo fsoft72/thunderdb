@@ -62,3 +62,39 @@ The storage layer can now:
 - Provide table statistics
 
 Next: Phase 2 - B-Tree Index Implementation
+
+---
+
+## 2026-02-06 - Phase 2: B-Tree Index (Step 2.1 - In-Memory B-Tree)
+
+### Step 2.1: In-Memory B-Tree Implementation
+- Implemented BTreeNode structure generic over key/value types
+- Support for both leaf and internal nodes
+- Node operations: insert, split, find_position
+- Leaf nodes linked for efficient range scans (next_leaf pointers)
+- Full B-Tree implementation with automatic node splitting
+- Operations: insert, search, range_scan, scan_all
+- Duplicate key support (multiple values per key)
+- Correct internal node navigation (keys >= K go to right child)
+- Tree statistics (node count, height, key count)
+- Comprehensive tests: 18 tests covering all operations
+
+Features:
+- Generic B-Tree: works with any K: PartialOrd, V types
+- Configurable order (minimum 3)
+- Automatic splitting when nodes become full
+- Parent pointers for efficient navigation
+- Sequential leaf scanning for range queries
+- Statistics for debugging and optimization
+
+Test Coverage:
+- Basic insert and search (exact match)
+- Duplicate key handling
+- Range queries with start/end bounds
+- Full table scan
+- Node splitting (both leaf and internal)
+- Large dataset (1000 entries)
+- Tree height verification
+- Empty range handling
+
+All 76 tests passing (58 storage + 18 index) ✓
