@@ -5,12 +5,12 @@ use thunderdb::repl::Repl;
 
 fn main() -> Result<()> {
     // Open database
-    let db = Database::open("./data")?;
+    let mut db = Database::open("./data")?;
 
     #[cfg(feature = "repl")]
     {
         // Run REPL
-        let mut repl = Repl::new(db.config())?;
+        let mut repl = Repl::new(&mut db)?;
         repl.run()?;
     }
 

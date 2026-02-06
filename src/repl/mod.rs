@@ -5,10 +5,12 @@
 pub mod commands;
 pub mod formatter;
 
-use crate::config::DatabaseConfig;
 use crate::error::Result;
-use crate::parser::parse_sql;
+use crate::parser::{parse_sql, Statement, Executor};
+use crate::query::DirectDataAccess;
 use crate::repl::commands::{parse_special_command, SpecialCommand};
+use crate::repl::formatter::format_results;
+use crate::Database;
 use std::time::Instant;
 
 #[cfg(feature = "repl")]
@@ -17,18 +19,19 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 /// REPL state
-pub struct Repl {
+pub struct Repl<'a> {
     prompt: String,
     history_file: String,
+    database: &'a mut Database,
     #[cfg(feature = "repl")]
     editor: DefaultEditor,
 }
 
-impl Repl {
+impl<'a> Repl<'a> {
     /// Create a new REPL
-    pub fn new(config: &DatabaseConfig) -> Result<Self> {
-        let prompt = config.repl.prompt.clone();
-        let history_file = config.repl.history_file.clone();
+    pub fn new(database: &'a mut Database) -> Result<Self> {
+        let prompt = database.config().repl.prompt.clone();
+        let history_file = database.config().repl.history_file.clone();
 
         #[cfg(feature = "repl")]
         let editor = DefaultEditor::new().map_err(|e| {
@@ -38,6 +41,7 @@ impl Repl {
         Ok(Self {
             prompt,
             history_file,
+            database,
             #[cfg(feature = "repl")]
             editor,
         })
@@ -151,16 +155,27 @@ impl Repl {
     }
 
     /// Execute SQL statement
-    fn execute_sql(&self, sql: &str) {
+    fn execute_sql(&mut self, sql: &str) {
         let start = Instant::now();
 
         match parse_sql(sql) {
             Ok(stmt) => {
+                let result = self.execute_statement(&stmt);
                 let elapsed = start.elapsed();
-                println!("Parsed: {} ({:.2}ms)", stmt.statement_type(), elapsed.as_secs_f64() * 1000.0);
-                println!();
-                println!("Note: Full execution not yet integrated.");
-                println!("AST: {:#?}", stmt);
+
+                match result {
+                    Ok(()) => {
+                        // Success message already printed by execute_statement
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                    }
+                }
+
+                let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+                if elapsed_ms >= 1.0 {
+                    println!("({:.2}ms)", elapsed_ms);
+                }
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -168,6 +183,66 @@ impl Repl {
         }
 
         println!();
+    }
+
+    /// Execute a parsed statement
+    fn execute_statement(&mut self, stmt: &Statement) -> Result<()> {
+        match stmt {
+            Statement::Select(select) => {
+                let rows = self.execute_select(select)?;
+
+                // Get column names
+                let column_names = if select.is_select_star() {
+                    // For now, use generic column names
+                    if let Some(first_row) = rows.first() {
+                        (0..first_row.values.len())
+                            .map(|i| format!("col{}", i))
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    select.get_column_names()
+                };
+
+                // Format and display results
+                if rows.is_empty() {
+                    println!("No rows returned");
+                } else {
+                    let formatted = format_results(&rows, &column_names);
+                    print!("{}", formatted);
+                    println!("{} row(s)", rows.len());
+                }
+
+                Ok(())
+            }
+            Statement::Insert(insert) => {
+                let values = Executor::get_insert_values(insert);
+                let row_id = self.database.insert_row(&insert.table, values)?;
+                println!("Inserted row with ID: {}", row_id);
+                Ok(())
+            }
+            Statement::Update(_update) => {
+                println!("UPDATE not yet implemented");
+                Ok(())
+            }
+            Statement::Delete(delete) => {
+                let filters = Executor::get_where_filters(&delete.where_clause)?;
+                let count = self.database.delete(&delete.table, filters)?;
+                println!("Deleted {} row(s)", count);
+                Ok(())
+            }
+        }
+    }
+
+    /// Execute a SELECT statement
+    fn execute_select(&mut self, select: &crate::parser::SelectStatement) -> Result<Vec<crate::storage::Row>> {
+        let query = Executor::select_to_query(select);
+        let filters = query.get_filters().to_vec();
+        let limit = query.get_limit();
+        let offset = query.get_offset();
+
+        self.database.scan_with_limit(&select.from, filters, limit, offset)
     }
 
     /// Show help message
@@ -197,8 +272,15 @@ impl Repl {
 
     /// Show tables list
     fn show_tables(&self) {
-        println!("Tables:");
-        println!("  (Table listing not yet implemented)");
+        let tables = self.database.list_tables();
+        if tables.is_empty() {
+            println!("No tables found");
+        } else {
+            println!("Tables:");
+            for table in tables {
+                println!("  - {}", table);
+            }
+        }
         println!();
     }
 
@@ -231,8 +313,9 @@ mod tests {
 
     #[test]
     fn test_repl_creation() {
-        let config = DatabaseConfig::default();
-        let result = Repl::new(&config);
+        let mut db = Database::open("/tmp/thunderdb_repl_test").unwrap();
+        let result = Repl::new(&mut db);
         assert!(result.is_ok());
+        std::fs::remove_dir_all("/tmp/thunderdb_repl_test").ok();
     }
 }

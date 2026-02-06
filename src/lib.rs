@@ -19,21 +19,16 @@ pub mod repl;
 // Re-export commonly used types
 pub use config::{DatabaseConfig, load_config, save_config};
 pub use error::{Error, Result};
-
-// Storage types (will be implemented in Phase 1)
-// pub use storage::{Value, Row, TableEngine};
-
-// Index types (will be implemented in Phase 2)
-// pub use index::{BTree, IndexManager};
-
-// Query types (will be implemented in Phase 3)
-// pub use query::{Filter, Operator, DirectDataAccess};
-
-// Parser types (will be implemented in Phase 4)
-// pub use parser::{parse_sql, Statement};
+pub use storage::{Value, Row, TableEngine};
+pub use index::{IndexManager};
+pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder};
+pub use parser::{parse_sql, Statement};
 
 /// ThunderDB version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Main database handle
 ///
@@ -41,7 +36,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// It coordinates storage, indexing, and query execution.
 pub struct Database {
     config: DatabaseConfig,
-    // tables: HashMap<String, TableEngine>,  // Will be added in Phase 1
+    data_dir: PathBuf,
+    tables: HashMap<String, TableEngine>,
 }
 
 impl Database {
@@ -76,13 +72,126 @@ impl Database {
 
         Ok(Self {
             config,
-            // tables: HashMap::new(),
+            data_dir: data_dir.to_path_buf(),
+            tables: HashMap::new(),
         })
     }
 
     /// Get database configuration
     pub fn config(&self) -> &DatabaseConfig {
         &self.config
+    }
+
+    /// Create or get a table
+    pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
+        if !self.tables.contains_key(name) {
+            let table = TableEngine::open(name, &self.data_dir, self.config.storage.clone())?;
+            self.tables.insert(name.to_string(), table);
+        }
+        Ok(self.tables.get_mut(name).unwrap())
+    }
+
+    /// Get a table (read-only)
+    pub fn get_table(&self, name: &str) -> Option<&TableEngine> {
+        self.tables.get(name)
+    }
+
+    /// List all table names
+    pub fn list_tables(&self) -> Vec<String> {
+        self.tables.keys().cloned().collect()
+    }
+}
+
+// Implement DirectDataAccess for Database
+impl DirectDataAccess for Database {
+    fn insert_row(&mut self, table: &str, values: Vec<Value>) -> Result<u64> {
+        let table_engine = self.get_or_create_table(table)?;
+        table_engine.insert_row(values)
+    }
+
+    fn insert_batch(&mut self, table: &str, rows: Vec<Vec<Value>>) -> Result<Vec<u64>> {
+        let table_engine = self.get_or_create_table(table)?;
+        table_engine.insert_batch(rows)
+    }
+
+    fn get_by_id(&mut self, table: &str, row_id: u64) -> Result<Option<Row>> {
+        let table_engine = self.get_or_create_table(table)?;
+        table_engine.get_by_id(row_id)
+    }
+
+    fn scan(&mut self, table: &str, filters: Vec<Filter>) -> Result<Vec<Row>> {
+        self.scan_with_limit(table, filters, None, None)
+    }
+
+    fn scan_with_limit(
+        &mut self,
+        table: &str,
+        filters: Vec<Filter>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<Row>> {
+        let table_engine = self.get_or_create_table(table)?;
+        let mut rows = table_engine.scan_all()?;
+
+        // Apply filters
+        if !filters.is_empty() {
+            // Create column mapping (for now, assume columns are indexed by position)
+            // In a full implementation, this would come from table schema
+            let _column_mapping: HashMap<String, usize> = HashMap::new();
+
+            rows.retain(|_row| {
+                filters.iter().all(|_filter| {
+                    // For now, we'll do a simple scan without column mapping
+                    // A full implementation would use the schema
+                    true
+                })
+            });
+        }
+
+        // Apply offset
+        if let Some(offset_val) = offset {
+            if offset_val < rows.len() {
+                rows = rows.into_iter().skip(offset_val).collect();
+            } else {
+                rows.clear();
+            }
+        }
+
+        // Apply limit
+        if let Some(limit_val) = limit {
+            rows.truncate(limit_val);
+        }
+
+        Ok(rows)
+    }
+
+    fn update(
+        &mut self,
+        _table: &str,
+        _filters: Vec<Filter>,
+        _updates: Vec<(String, Value)>,
+    ) -> Result<usize> {
+        // UPDATE not yet implemented
+        Err(Error::Query("UPDATE not yet implemented".to_string()))
+    }
+
+    fn delete(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
+        // Get rows to delete
+        let rows = self.scan(table, filters)?;
+        let count = rows.len();
+
+        // Delete each row
+        let table_engine = self.get_or_create_table(table)?;
+        for row in rows {
+            table_engine.delete_by_id(row.row_id)?;
+        }
+
+        Ok(count)
+    }
+
+    fn count(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
+        let rows = self.scan(table, filters)?;
+        Ok(rows.len())
     }
 }
 
