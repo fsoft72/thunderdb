@@ -11,7 +11,7 @@ then
 fi
 
 echo "Building WASM module..."
-wasm-pack build --target web -- --features wasm
+wasm-pack build --target web -- --no-default-features --features wasm
 
 echo "WASM module available in the 'pkg' directory"
 ls -lh pkg/
