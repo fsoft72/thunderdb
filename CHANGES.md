@@ -192,3 +192,79 @@ The index layer provides:
 - Query optimization statistics
 
 Next: Phase 3 - Direct Data Access API
+
+---
+
+## 2026-02-06 - Phase 3: Direct Data Access API
+
+### Step 3.1: Filter & Operator Types
+- Filter structure for column-based conditions
+- Operator enum: Equals, NotEquals, GreaterThan, LessThan, Between, In, Like, IsNull, etc.
+- Type-safe query construction without SQL parsing
+- matches() method to test values against operators
+- can_use_index() to identify index-optimizable operators
+- Display trait for readable filter representation
+- Comprehensive tests: 17 tests for all operator types
+
+Features:
+- All comparison operators (<, >, <=, >=, =, !=)
+- Range operators (BETWEEN, IN, NOT IN)
+- Pattern matching (LIKE, NOT LIKE)
+- NULL checks (IS NULL, IS NOT NULL)
+- Index-aware: identifies which operators can use B-Tree
+- Works with all Value types (Int, Float, Varchar, etc.)
+
+### Step 3.2: Direct CRUD Operations
+- DirectDataAccess trait for type-safe database operations
+- Operations: insert_row, insert_batch, get_by_id, scan, update, delete, count
+- QueryContext for execution statistics tracking
+- Helper functions: apply_filters, choose_index
+- Index selection logic (prioritizes Equals > Range > others)
+- Filter application with column mapping
+- Comprehensive tests: 8 tests for query helpers
+
+Features:
+- Type-safe API bypassing SQL parser
+- Batch operations for efficiency
+- Query optimization via index selection
+- AND-combined filters
+- Execution statistics (rows scanned, index used, etc.)
+- Column mapping for flexible schemas
+
+### Step 3.3: QueryBuilder Pattern
+- Fluent API for building queries
+- Chainable methods: filter(), limit(), offset(), select(), order_by()
+- QueryPlan structure for execution
+- Operations: apply_pagination, apply_ordering, apply_projection
+- OrderDirection enum (Asc, Desc)
+- Helper methods: order_by_asc(), order_by_desc()
+- Comprehensive tests: 10 tests for builder and execution
+
+Features:
+- Fluent/chainable API: `QueryBuilder::from("users").filter(...).limit(10)`
+- SELECT specific columns (projection)
+- ORDER BY with ASC/DESC
+- LIMIT and OFFSET for pagination
+- Filter combination (AND logic)
+- Query plan decomposition for execution
+
+All 151 tests passing (58 storage + 58 index + 35 query) ✓
+
+## Phase 3 Status: COMPLETE ✓
+
+Direct Data Access API provides:
+- Type-safe query construction ✓
+- Filter and operator types ✓
+- CRUD operations trait ✓
+- Query builder pattern ✓
+- Index-aware optimization ✓
+- Execution statistics ✓
+
+The query layer enables:
+- Zero SQL parsing overhead
+- Type-safe operations at compile time
+- Index optimization automatically applied
+- Fluent query building
+- Execution statistics for monitoring
+
+Next: Phase 4 - SQL Parser
