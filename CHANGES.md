@@ -98,3 +98,44 @@ Test Coverage:
 - Empty range handling
 
 All 76 tests passing (58 storage + 18 index) ✓
+
+### Step 2.2: B-Tree Persistence
+- Binary serialization format with magic number and versioning
+- Save/load B-Tree to .idx files
+- Header format: magic + version + order + root_id + key_count
+- Efficient storage by saving key-value pairs and rebuilding structure
+- LRU NodeCache for frequently accessed nodes
+- Cache eviction policy (least recently used)
+- Cache statistics tracking
+- Comprehensive tests: 9 tests for persistence and caching
+
+Features:
+- Persistent indices survive database restarts
+- LRU cache reduces disk I/O for hot nodes
+- Configurable cache capacity
+- Automatic eviction when at capacity
+- Cache hit tracking for optimization
+
+### Step 2.3: IndexManager
+- Manages multiple indices per table
+- Column-to-index mapping
+- Operations: create_index, drop_index, insert_row, delete_row
+- Search by exact value or range query
+- Index rebuild capability from existing rows
+- Persistence: save/load all indices to disk
+- Index statistics (key count, tree height, node count)
+- Comprehensive tests: 9 tests for multi-index management
+
+Features:
+- Multiple indices per table (e.g., index on id, age, name)
+- Automatic index updates on row insertion
+- Range queries using B-Tree range_scan
+- Index file management (.idx files per column)
+- Rebuild indices from table data
+- Statistics for query optimization
+
+All 94 tests passing (58 storage + 27 index) ✓
+
+## Phase 2 Progress: Steps 2.1-2.3 Complete ✓
+
+Next: Step 2.4 - LIKE Operator Support

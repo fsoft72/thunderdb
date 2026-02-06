@@ -10,3 +10,5 @@ pub mod lazy;
 
 pub use btree::{BTree, BTreeStats};
 pub use node::{BTreeNode, NodeType};
+pub use persist::{save_index, load_index, NodeCache, CacheStats};
+pub use manager::{IndexManager, IndexManagerStats, IndexInfo};
