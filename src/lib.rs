@@ -82,10 +82,19 @@ impl Database {
         &self.config
     }
 
-    /// Create or get a table
-    pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
+    /// Get a table, loading it if necessary. Fails if table doesn't exist.
+    pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
             let table = TableEngine::open(name, &self.data_dir, self.config.storage.clone())?;
+            self.tables.insert(name.to_string(), table);
+        }
+        Ok(self.tables.get_mut(name).unwrap())
+    }
+
+    /// Create or get a table.
+    pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
+        if !self.tables.contains_key(name) {
+            let table = TableEngine::create(name, &self.data_dir, self.config.storage.clone())?;
             self.tables.insert(name.to_string(), table);
         }
         Ok(self.tables.get_mut(name).unwrap())
@@ -98,7 +107,47 @@ impl Database {
 
     /// List all table names
     pub fn list_tables(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        let mut table_names = std::collections::HashSet::new();
+
+        // Add already loaded tables
+        for name in self.tables.keys() {
+            table_names.insert(name.clone());
+        }
+
+        // Scan data directory for other tables
+        if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            // Check if it's a valid table directory (contains data.bin)
+                            if entry.path().join("data.bin").exists() {
+                                table_names.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<String> = table_names.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Drop a table
+    pub fn drop_table(&mut self, name: &str) -> Result<()> {
+        // Remove from memory
+        self.tables.remove(name);
+
+        // Remove from disk
+        let table_dir = self.data_dir.join(name);
+        if table_dir.exists() {
+            std::fs::remove_dir_all(table_dir)?;
+            Ok(())
+        } else {
+            Err(Error::TableNotFound(name.to_string()))
+        }
     }
 }
 
@@ -115,7 +164,7 @@ impl DirectDataAccess for Database {
     }
 
     fn get_by_id(&mut self, table: &str, row_id: u64) -> Result<Option<Row>> {
-        let table_engine = self.get_or_create_table(table)?;
+        let table_engine = self.get_table_mut(table)?;
         table_engine.get_by_id(row_id)
     }
 
@@ -130,19 +179,39 @@ impl DirectDataAccess for Database {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<Row>> {
-        let table_engine = self.get_or_create_table(table)?;
+        let table_engine = self.get_table_mut(table)?;
+        
+        // Build column mapping from schema if available
+        let mut column_mapping = std::collections::HashMap::new();
+        if let Some(schema) = table_engine.schema() {
+            for (i, col) in schema.columns.iter().enumerate() {
+                column_mapping.insert(col.name.clone(), i);
+            }
+        }
+
         let mut rows = table_engine.scan_all()?;
 
         // Apply filters
         if !filters.is_empty() {
-            // Create column mapping (for now, assume columns are indexed by position)
-            // In a full implementation, this would come from table schema
-            let _column_mapping: HashMap<String, usize> = HashMap::new();
+            rows.retain(|row| {
+                filters.iter().all(|filter| {
+                    // Try to map column name
+                    let col_idx = if let Some(&idx) = column_mapping.get(&filter.column) {
+                        Some(idx)
+                    } else if filter.column.starts_with("col") {
+                        filter.column[3..].parse::<usize>().ok()
+                    } else {
+                        None
+                    };
 
-            rows.retain(|_row| {
-                filters.iter().all(|_filter| {
-                    // For now, we'll do a simple scan without column mapping
-                    // A full implementation would use the schema
+                    if let Some(idx) = col_idx {
+                        if let Some(value) = row.values.get(idx) {
+                            return filter.matches(value);
+                        }
+                    }
+                    
+                    // If we can't map the column, we ignore the filter or return true.
+                    // To be safe for queries that might use unknown columns, return true.
                     true
                 })
             });
@@ -167,12 +236,52 @@ impl DirectDataAccess for Database {
 
     fn update(
         &mut self,
-        _table: &str,
-        _filters: Vec<Filter>,
-        _updates: Vec<(String, Value)>,
+        table: &str,
+        filters: Vec<Filter>,
+        updates: Vec<(String, Value)>,
     ) -> Result<usize> {
-        // UPDATE not yet implemented
-        Err(Error::Query("UPDATE not yet implemented".to_string()))
+        // Get rows to update
+        let rows = self.scan(table, filters)?;
+        let count = rows.len();
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let table_engine = self.get_table_mut(table)?;
+        
+        // Build column mapping from schema if available
+        let mut column_mapping = std::collections::HashMap::new();
+        if let Some(schema) = table_engine.schema() {
+            for (i, col) in schema.columns.iter().enumerate() {
+                column_mapping.insert(col.name.clone(), i);
+            }
+        }
+        
+        for mut row in rows {
+            let row_id = row.row_id;
+            
+            // Apply updates to row.values
+            for (col_name, new_val) in &updates {
+                let col_idx = if let Some(&idx) = column_mapping.get(col_name) {
+                    Some(idx)
+                } else if col_name.starts_with("col") {
+                    col_name[3..].parse::<usize>().ok()
+                } else {
+                    None
+                };
+
+                if let Some(idx) = col_idx {
+                    if idx < row.values.len() {
+                        row.values[idx] = new_val.clone();
+                    }
+                }
+            }
+            
+            table_engine.update_row(row_id, row.values)?;
+        }
+
+        Ok(count)
     }
 
     fn delete(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
@@ -181,7 +290,7 @@ impl DirectDataAccess for Database {
         let count = rows.len();
 
         // Delete each row
-        let table_engine = self.get_or_create_table(table)?;
+        let table_engine = self.get_table_mut(table)?;
         for row in rows {
             table_engine.delete_by_id(row.row_id)?;
         }

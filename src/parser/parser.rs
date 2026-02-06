@@ -36,9 +36,13 @@ impl Parser {
             Token::Insert => self.parse_insert()?,
             Token::Update => self.parse_update()?,
             Token::Delete => self.parse_delete()?,
+            Token::Show => self.parse_show()?,
+            Token::Use => self.parse_use()?,
+            Token::Create => self.parse_create()?,
+            Token::Drop => self.parse_drop()?,
             _ => {
                 return Err(Error::Parser(format!(
-                    "Expected SELECT, INSERT, UPDATE, or DELETE, got {:?}",
+                    "Expected SELECT, INSERT, UPDATE, DELETE, SHOW, USE, CREATE, or DROP, got {:?}",
                     self.current()
                 )));
             }
@@ -238,6 +242,108 @@ impl Parser {
             table,
             where_clause,
         }))
+    }
+
+    /// Parse SHOW statement
+    fn parse_show(&mut self) -> Result<Statement> {
+        self.expect(Token::Show)?;
+
+        match self.current() {
+            Token::Tables => {
+                self.advance();
+                Ok(Statement::ShowTables)
+            }
+            Token::Databases => {
+                self.advance();
+                Ok(Statement::ShowDatabases)
+            }
+            _ => Err(Error::Parser(format!(
+                "Expected TABLES or DATABASES after SHOW, got {:?}",
+                self.current()
+            ))),
+        }
+    }
+
+    /// Parse USE statement
+    fn parse_use(&mut self) -> Result<Statement> {
+        self.expect(Token::Use)?;
+        let db_name = self.expect_identifier()?;
+        Ok(Statement::Use(db_name))
+    }
+
+    /// Parse CREATE statement
+    fn parse_create(&mut self) -> Result<Statement> {
+        self.expect(Token::Create)?;
+
+        match self.current() {
+            Token::Table => self.parse_create_table(),
+            _ => Err(Error::Parser(format!(
+                "Expected TABLE after CREATE, got {:?}",
+                self.current()
+            ))),
+        }
+    }
+
+    /// Parse CREATE TABLE statement
+    fn parse_create_table(&mut self) -> Result<Statement> {
+        self.expect(Token::Table)?;
+
+        let name = self.expect_identifier()?;
+
+        self.expect(Token::LeftParen)?;
+
+        let mut columns = Vec::new();
+        loop {
+            let col_name = self.expect_identifier()?;
+            let data_type = self.parse_data_type()?;
+
+            columns.push(ColumnDefinition {
+                name: col_name,
+                data_type,
+            });
+
+            if !self.match_token(&Token::Comma) {
+                break;
+            }
+        }
+
+        self.expect(Token::RightParen)?;
+
+        Ok(Statement::CreateTable(CreateTableStatement { name, columns }))
+    }
+
+    /// Parse data type
+    fn parse_data_type(&mut self) -> Result<DataType> {
+        let type_name = self.expect_identifier()?.to_uppercase();
+
+        match type_name.as_str() {
+            "INT" | "INTEGER" => Ok(DataType::Int),
+            "VARCHAR" | "TEXT" | "STRING" => Ok(DataType::Varchar),
+            "FLOAT" | "DOUBLE" | "REAL" => Ok(DataType::Float),
+            "TIMESTAMP" | "DATETIME" => Ok(DataType::Timestamp),
+            "BOOLEAN" | "BOOL" => Ok(DataType::Boolean),
+            _ => Err(Error::Parser(format!("Unsupported data type: {}", type_name))),
+        }
+    }
+
+    /// Parse DROP statement
+    fn parse_drop(&mut self) -> Result<Statement> {
+        self.expect(Token::Drop)?;
+
+        match self.current() {
+            Token::Table => self.parse_drop_table(),
+            _ => Err(Error::Parser(format!(
+                "Expected TABLE after DROP, got {:?}",
+                self.current()
+            ))),
+        }
+    }
+
+    /// Parse DROP TABLE statement
+    fn parse_drop_table(&mut self) -> Result<Statement> {
+        self.expect(Token::Table)?;
+        let name = self.expect_identifier()?;
+        Ok(Statement::DropTable(name))
     }
 
     /// Parse expression (handles precedence)

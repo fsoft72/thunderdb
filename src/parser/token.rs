@@ -32,6 +32,13 @@ pub enum Token {
     Offset,
     Asc,
     Desc,
+    Show,
+    Tables,
+    Databases,
+    Use,
+    Create,
+    Table,
+    Drop,
 
     // Operators
     Equals,           // =
@@ -325,6 +332,13 @@ impl Tokenizer {
             "OFFSET" => Token::Offset,
             "ASC" => Token::Asc,
             "DESC" => Token::Desc,
+            "SHOW" => Token::Show,
+            "TABLES" => Token::Tables,
+            "DATABASES" => Token::Databases,
+            "USE" => Token::Use,
+            "CREATE" => Token::Create,
+            "TABLE" => Token::Table,
+            "DROP" => Token::Drop,
             _ => Token::Identifier(value),
         }
     }

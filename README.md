@@ -107,6 +107,20 @@ Copy `config.example.json` to `config.json` and adjust settings:
 - [ ] REPL interface
 - [ ] Testing and benchmarks
 
+## Testing
+
+Run all tests including unit and integration tests:
+
+```bash
+cargo test
+```
+
+To run specifically the SQL command test suite:
+
+```bash
+cargo test --test blog_suite
+```
+
 ## Performance Targets
 
 - INSERT: >10,000 rows/sec (single), >50,000 rows/sec (batch)

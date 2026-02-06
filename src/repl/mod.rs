@@ -155,7 +155,12 @@ impl<'a> Repl<'a> {
     }
 
     /// Execute SQL statement
-    fn execute_sql(&mut self, sql: &str) {
+    pub fn execute_sql(&mut self, sql: &str) {
+        let sql = sql.trim();
+        if sql.is_empty() || sql.starts_with("--") {
+            return;
+        }
+
         let start = Instant::now();
 
         match parse_sql(sql) {
@@ -168,6 +173,13 @@ impl<'a> Repl<'a> {
                         // Success message already printed by execute_statement
                     }
                     Err(e) => {
+                        // Special case: ignore TableNotFound during DROP TABLE for idempotency
+                        if let Statement::DropTable(_) = stmt {
+                            if let crate::error::Error::TableNotFound(_) = e {
+                                // Silently ignore
+                                return;
+                            }
+                        }
                         eprintln!("Error: {}", e);
                     }
                 }
@@ -193,8 +205,18 @@ impl<'a> Repl<'a> {
 
                 // Get column names
                 let column_names = if select.is_select_star() {
-                    // For now, use generic column names
-                    if let Some(first_row) = rows.first() {
+                    // Try to get from table schema
+                    if let Some(table) = self.database.get_table(&select.from) {
+                        if let Some(schema) = table.schema() {
+                            schema.columns.iter().map(|c| c.name.clone()).collect()
+                        } else if let Some(first_row) = rows.first() {
+                            (0..first_row.values.len())
+                                .map(|i| format!("col{}", i))
+                                .collect()
+                        } else {
+                            vec![]
+                        }
+                    } else if let Some(first_row) = rows.first() {
                         (0..first_row.values.len())
                             .map(|i| format!("col{}", i))
                             .collect()
@@ -222,14 +244,48 @@ impl<'a> Repl<'a> {
                 println!("Inserted row with ID: {}", row_id);
                 Ok(())
             }
-            Statement::Update(_update) => {
-                println!("UPDATE not yet implemented");
+            Statement::Update(update) => {
+                let filters = Executor::get_where_filters(&update.where_clause)?;
+                let updates = Executor::get_update_assignments(update)?;
+                match self.database.update(&update.table, filters, updates) {
+                    Ok(count) => println!("Updated {} row(s)", count),
+                    Err(e) => eprintln!("Error: {}", e),
+                }
                 Ok(())
             }
             Statement::Delete(delete) => {
                 let filters = Executor::get_where_filters(&delete.where_clause)?;
                 let count = self.database.delete(&delete.table, filters)?;
                 println!("Deleted {} row(s)", count);
+                Ok(())
+            }
+            Statement::ShowTables => {
+                self.show_tables();
+                Ok(())
+            }
+            Statement::ShowDatabases => {
+                self.show_databases();
+                Ok(())
+            }
+            Statement::Use(db_name) => {
+                self.switch_database(db_name)?;
+                Ok(())
+            }
+            Statement::CreateTable(create) => {
+                let table_engine = self.database.get_or_create_table(&create.name)?;
+                let columns: Vec<crate::storage::table_engine::ColumnInfo> = create.columns.iter().map(|c| {
+                    crate::storage::table_engine::ColumnInfo {
+                        name: c.name.clone(),
+                        data_type: format!("{:?}", c.data_type).to_uppercase(),
+                    }
+                }).collect();
+                table_engine.set_schema(crate::storage::table_engine::TableSchema { columns })?;
+                println!("Table created: {}", create.name);
+                Ok(())
+            }
+            Statement::DropTable(table) => {
+                self.database.drop_table(&table)?;
+                println!("Table dropped: {}", table);
                 Ok(())
             }
         }
@@ -246,7 +302,7 @@ impl<'a> Repl<'a> {
     }
 
     /// Show help message
-    fn show_help(&self) {
+    pub fn show_help(&self) {
         println!("ThunderDB Commands:");
         println!();
         println!("  SQL Commands:");
@@ -254,6 +310,8 @@ impl<'a> Repl<'a> {
         println!("    INSERT INTO table VALUES (value1, value2, ...);");
         println!("    UPDATE table SET column = value WHERE condition;");
         println!("    DELETE FROM table WHERE condition;");
+        println!("    CREATE TABLE table (col1 type, col2 type, ...);");
+        println!("    DROP TABLE table;");
         println!();
         println!("  Special Commands:");
         println!("    .help              Show this help message");
@@ -271,24 +329,56 @@ impl<'a> Repl<'a> {
     }
 
     /// Show tables list
-    fn show_tables(&self) {
+    pub fn show_tables(&self) {
         let tables = self.database.list_tables();
         if tables.is_empty() {
             println!("No tables found");
         } else {
-            println!("Tables:");
+            println!("Tables in current database:");
             for table in tables {
-                println!("  - {}", table);
+                println!("  {}", table);
             }
         }
+    }
+
+    /// Show databases list
+    pub fn show_databases(&self) {
+        println!("Databases:");
+        println!("  Currently using: {}", self.database.config().storage.data_dir);
         println!();
+        println!("Note: To switch databases, use: USE <database_name>");
+        println!("      This will open/create a database in ./data/<database_name>");
+    }
+
+    /// Switch to a different database
+    fn switch_database(&mut self, db_name: &str) -> Result<()> {
+        println!("Database switching in REPL requires restart.");
+        println!("Restart with database path: ./data/{}", db_name);
+        println!();
+        println!("Or manually specify path when opening database.");
+        Ok(())
     }
 
     /// Show table schema
-    fn show_schema(&self, table: &Option<String>) {
+    pub fn show_schema(&mut self, table: &Option<String>) {
         if let Some(table_name) = table {
-            println!("Schema for table: {}", table_name);
-            println!("  (Schema display not yet implemented)");
+            match self.database.get_table_mut(table_name) {
+                Ok(table_engine) => {
+                    if let Some(schema) = table_engine.schema() {
+                        println!("Schema for table: {}", table_name);
+                        println!("+----------------------+----------------------+");
+                        println!("| Column               | Type                 |");
+                        println!("+----------------------+----------------------+");
+                        for col in &schema.columns {
+                            println!("| {:<20} | {:<20} |", col.name, col.data_type);
+                        }
+                        println!("+----------------------+----------------------+");
+                    } else {
+                        println!("No schema defined for table: {}", table_name);
+                    }
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
         } else {
             println!("Usage: .schema <table_name>");
         }
@@ -296,10 +386,18 @@ impl<'a> Repl<'a> {
     }
 
     /// Show table statistics
-    fn show_stats(&self, table: &Option<String>) {
+    pub fn show_stats(&mut self, table: &Option<String>) {
         if let Some(table_name) = table {
-            println!("Statistics for table: {}", table_name);
-            println!("  (Statistics display not yet implemented)");
+            match self.database.get_table_mut(table_name) {
+                Ok(table_engine) => {
+                    let stats = table_engine.stats();
+                    println!("Statistics for table: {}", table_name);
+                    println!("  Total rows:  {}", stats.total_rows);
+                    println!("  Active rows: {}", stats.active_rows);
+                    println!("  Data file:   {} bytes", stats.data_file_size);
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
         } else {
             println!("Usage: .stats <table_name>");
         }

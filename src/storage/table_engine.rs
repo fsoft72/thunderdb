@@ -1,38 +1,57 @@
 use crate::config::StorageConfig;
-use crate::error::Result;
+use crate::error::{Result, Error};
 use crate::storage::{DataFile, RecordAddressTable, Row, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use serde::{Serialize, Deserialize};
+
+/// Column metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: String,
+}
+
+/// Table schema metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSchema {
+    pub columns: Vec<ColumnInfo>,
+}
 
 /// TableEngine coordinates storage operations for a single table
 ///
 /// Manages:
 /// - data.bin (append-only row storage)
 /// - rat.bin (Record Address Table)
+/// - schema.json (Table metadata)
 /// - Auto-generated row IDs
 pub struct TableEngine {
     name: String,
     table_dir: PathBuf,
     data_file: DataFile,
     rat: RecordAddressTable,
+    schema: Option<TableSchema>,
     next_row_id: AtomicU64,
     config: StorageConfig,
 }
 
 impl TableEngine {
-    /// Open or create a table
+    /// Open an existing table
     ///
     /// # Arguments
     /// * `name` - Table name
     /// * `base_dir` - Base directory for database
     /// * `config` - Storage configuration
+    ///
+    /// # Returns
+    /// A Result with the TableEngine if it exists, or Error::TableNotFound
     pub fn open<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig) -> Result<Self> {
         let base_dir = base_dir.as_ref();
 
-        // Create table directory
+        // Check if table directory exists
         let table_dir = base_dir.join(name);
         if ! table_dir.exists() {
-            std::fs::create_dir_all(&table_dir)?;
+            return Err(Error::TableNotFound(name.to_string()));
         }
 
         // Open data file
@@ -43,6 +62,15 @@ impl TableEngine {
         let rat_path = table_dir.join("rat.bin");
         let rat = RecordAddressTable::load(&rat_path)?;
 
+        // Load Schema
+        let schema_path = table_dir.join("schema.json");
+        let schema = if schema_path.exists() {
+            let content = std::fs::read_to_string(&schema_path)?;
+            Some(serde_json::from_str(&content)?)
+        } else {
+            None
+        };
+
         // Determine next row ID
         let max_row_id = rat.row_ids().into_iter().max().unwrap_or(0);
         let next_row_id = AtomicU64::new(max_row_id + 1);
@@ -52,9 +80,42 @@ impl TableEngine {
             table_dir,
             data_file,
             rat,
+            schema,
             next_row_id,
             config,
         })
+    }
+
+    /// Set table schema
+    pub fn set_schema(&mut self, schema: TableSchema) -> Result<()> {
+        let schema_path = self.table_dir.join("schema.json");
+        let content = serde_json::to_string_pretty(&schema)?;
+        std::fs::write(schema_path, content)?;
+        self.schema = Some(schema);
+        Ok(())
+    }
+
+    /// Get table schema
+    pub fn schema(&self) -> Option<&TableSchema> {
+        self.schema.as_ref()
+    }
+
+    /// Create a new table or open it if it already exists
+    ///
+    /// # Arguments
+    /// * `name` - Table name
+    /// * `base_dir` - Base directory for database
+    /// * `config` - Storage configuration
+    pub fn create<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig) -> Result<Self> {
+        let base_dir = base_dir.as_ref();
+
+        // Create table directory if it doesn't exist
+        let table_dir = base_dir.join(name);
+        if ! table_dir.exists() {
+            std::fs::create_dir_all(&table_dir)?;
+        }
+
+        Self::open(name, base_dir, config)
     }
 
     /// Insert a new row
@@ -112,6 +173,37 @@ impl TableEngine {
             self.data_file.read_row(offset, length)
         } else {
             Ok(None)
+        }
+    }
+
+    /// Update a row by ID
+    ///
+    /// # Arguments
+    /// * `row_id` - Row ID to update
+    /// * `values` - New column values
+    ///
+    /// # Returns
+    /// true if row was found and updated, false otherwise
+    pub fn update_row(&mut self, row_id: u64, values: Vec<Value>) -> Result<bool> {
+        if let Some((offset, _length)) = self.rat.get(row_id) {
+            // Mark old row as deleted in data file
+            self.data_file.mark_deleted(offset)?;
+            
+            // Mark as deleted in RAT so insert can overwrite it
+            self.rat.delete(row_id);
+
+            // Create new row with same ID
+            let row = Row::new(row_id, values);
+
+            // Append to data file
+            let (new_offset, new_length) = self.data_file.append_row(&row)?;
+
+            // Update RAT with new position (now allowed because it's deleted)
+            self.rat.insert(row_id, new_offset, new_length)?;
+
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -245,7 +337,7 @@ mod tests {
             max_data_file_size_mb: 1024,
         };
 
-        TableEngine::open(name, &base_dir, config).unwrap()
+        TableEngine::create(name, &base_dir, config).unwrap()
     }
 
     #[test]
@@ -364,7 +456,7 @@ mod tests {
 
         // Create table and insert data
         {
-            let mut table = TableEngine::open("users", base_dir, config.clone()).unwrap();
+            let mut table = TableEngine::create("users", base_dir, config.clone()).unwrap();
 
             for i in 1..=5 {
                 table
@@ -432,7 +524,7 @@ mod tests {
 
         // Create table and insert data
         {
-            let mut table = TableEngine::open("test", base_dir, config.clone()).unwrap();
+            let mut table = TableEngine::create("test", base_dir, config.clone()).unwrap();
 
             for i in 1..=5 {
                 table.insert_row(vec![Value::Int32(i)]).unwrap();

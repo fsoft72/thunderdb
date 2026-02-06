@@ -11,6 +11,35 @@ pub enum Statement {
     Insert(InsertStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
+    ShowTables,
+    ShowDatabases,
+    Use(String),
+    CreateTable(CreateTableStatement),
+    DropTable(String),
+}
+
+/// CREATE TABLE statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTableStatement {
+    pub name: String,
+    pub columns: Vec<ColumnDefinition>,
+}
+
+/// Column definition in CREATE TABLE
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDefinition {
+    pub name: String,
+    pub data_type: DataType,
+}
+
+/// Data types supported by the engine
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataType {
+    Int,
+    Varchar,
+    Float,
+    Timestamp,
+    Boolean,
 }
 
 /// SELECT statement
@@ -170,6 +199,11 @@ impl Statement {
             Statement::Insert(_) => "INSERT",
             Statement::Update(_) => "UPDATE",
             Statement::Delete(_) => "DELETE",
+            Statement::ShowTables => "SHOW TABLES",
+            Statement::ShowDatabases => "SHOW DATABASES",
+            Statement::Use(_) => "USE",
+            Statement::CreateTable(_) => "CREATE TABLE",
+            Statement::DropTable(_) => "DROP TABLE",
         }
     }
 }

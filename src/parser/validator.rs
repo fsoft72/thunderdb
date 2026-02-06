@@ -36,6 +36,11 @@ impl Validator {
             Statement::Insert(i) => self.validate_insert(i),
             Statement::Update(u) => self.validate_update(u),
             Statement::Delete(d) => self.validate_delete(d),
+            Statement::ShowTables => Ok(()), // No validation needed
+            Statement::ShowDatabases => Ok(()), // No validation needed
+            Statement::Use(_) => Ok(()), // No validation needed - database path is checked at runtime
+            Statement::CreateTable(_) => Ok(()), // Basic structural validation done by parser
+            Statement::DropTable(_) => Ok(()), // Basic structural validation done by parser
         }
     }
 

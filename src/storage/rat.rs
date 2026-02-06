@@ -165,11 +165,25 @@ impl RecordAddressTable {
     /// * `length` - Length of serialized row
     ///
     /// # Returns
-    /// Error if row_id already exists
+    /// Error if row_id already exists and is active
     pub fn insert(&mut self, row_id: u64, offset: u64, length: u32) -> Result<()> {
         // Binary search to find insertion point
         match self.entries.binary_search_by_key(&row_id, |e| e.row_id) {
-            Ok(_) => Err(Error::Storage(format!("Row ID {} already exists", row_id))),
+            Ok(pos) => {
+                // If it's already there, it must be deleted to be overwritten
+                if self.entries[pos].deleted {
+                    self.entries[pos] = RatEntry {
+                        row_id,
+                        offset,
+                        length,
+                        deleted: false,
+                    };
+                    self.dirty = true;
+                    Ok(())
+                } else {
+                    Err(Error::Storage(format!("Row ID {} already exists and is active", row_id)))
+                }
+            }
             Err(pos) => {
                 self.entries.insert(
                     pos,

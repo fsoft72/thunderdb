@@ -33,3 +33,11 @@ harness = false
 [[bench]]
 name = "index_bench"
 harness = false
+
+[[test]]
+name = "blog_suite"
+path = "tests/sql/blog_suite.rs"
+
+[[test]]
+name = "table_existence"
+path = "tests/table_existence.rs"
