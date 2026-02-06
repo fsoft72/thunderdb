@@ -12,6 +12,7 @@ pub mod storage;
 pub mod index;
 pub mod query;
 pub mod parser;
+#[cfg(feature = "wasm")]
 pub mod wasm;
 
 #[cfg(feature = "repl")]
@@ -49,6 +50,7 @@ impl Database {
     ///
     /// # Returns
     /// A Database instance ready for operations
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open<P: AsRef<std::path::Path>>(data_dir: P) -> Result<Self> {
         let data_dir = data_dir.as_ref();
 
@@ -74,6 +76,16 @@ impl Database {
         Ok(Self {
             config,
             data_dir: data_dir.to_path_buf(),
+            tables: HashMap::new(),
+        })
+    }
+
+    /// Open an in-memory database (for WASM or testing)
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_in_memory() -> Result<Self> {
+        Ok(Self {
+            config: DatabaseConfig::default(),
+            data_dir: PathBuf::from("/memory"),
             tables: HashMap::new(),
         })
     }
@@ -116,14 +128,17 @@ impl Database {
         }
 
         // Scan data directory for other tables
-        if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
-            for entry in entries.flatten() {
-                if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_dir() {
-                        if let Some(name) = entry.file_name().to_str() {
-                            // Check if it's a valid table directory (contains data.bin)
-                            if entry.path().join("data.bin").exists() {
-                                table_names.insert(name.to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(file_type) = entry.file_type() {
+                        if file_type.is_dir() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                // Check if it's a valid table directory (contains data.bin)
+                                if entry.path().join("data.bin").exists() {
+                                    table_names.insert(name.to_string());
+                                }
                             }
                         }
                     }
@@ -142,13 +157,19 @@ impl Database {
         self.tables.remove(name);
 
         // Remove from disk
-        let table_dir = self.data_dir.join(name);
-        if table_dir.exists() {
-            std::fs::remove_dir_all(table_dir)?;
-            Ok(())
-        } else {
-            Err(Error::TableNotFound(name.to_string()))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let table_dir = self.data_dir.join(name);
+            if table_dir.exists() {
+                std::fs::remove_dir_all(table_dir)?;
+                return Ok(());
+            } else {
+                return Err(Error::TableNotFound(name.to_string()));
+            }
         }
+
+        #[cfg(target_arch = "wasm32")]
+        Ok(())
     }
 }
 

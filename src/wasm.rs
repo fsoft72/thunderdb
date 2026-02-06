@@ -1,5 +1,6 @@
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "wasm")]
 use crate::Database;
 
 #[cfg(feature = "wasm")]
@@ -13,16 +14,14 @@ pub struct ThunderDBWasm {
 impl ThunderDBWasm {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        // In WASM, we might want to use a virtual file system or just memory.
-        // For now, let's use a dummy path. 
-        // Note: Real persistence in WASM requires more complex setup (IndexedDB, etc.)
-        let db = Database::open("/tmp/thunderdb").unwrap();
+        let db = Database::open_in_memory().unwrap();
         Self { db }
     }
 
     pub fn query(&mut self, sql: &str) -> String {
-        // Simple placeholder for SQL execution in WASM
-        format!("Executing SQL: {}", sql)
+        // Use the database to list tables as a simple test of integration
+        let tables = self.db.list_tables();
+        format!("Executing SQL: {}. Current tables: {:?}", sql, tables)
     }
 
     pub fn version(&self) -> String {
