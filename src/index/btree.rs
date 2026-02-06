@@ -167,6 +167,63 @@ where
         results
     }
 
+    /// Scan from start_key to the end of the tree
+    pub fn scan_from(&self, start_key: &K) -> Vec<(K, V)> {
+        let mut results = Vec::new();
+        let mut current_leaf_id = self.find_leaf(start_key);
+
+        loop {
+            let leaf = match self.nodes.get(&current_leaf_id) {
+                Some(node) => node,
+                None => break,
+            };
+
+            for i in 0..leaf.keys.len() {
+                let key = &leaf.keys[i];
+                if key.partial_cmp(start_key).unwrap() >= std::cmp::Ordering::Equal {
+                    results.push((key.clone(), leaf.values[i].clone()));
+                }
+            }
+
+            match leaf.next_leaf {
+                Some(next_id) => current_leaf_id = next_id,
+                None => break,
+            }
+        }
+        results
+    }
+
+    /// Scan from the beginning of the tree up to end_key
+    pub fn scan_to(&self, end_key: &K) -> Vec<(K, V)> {
+        let mut results = Vec::new();
+        let mut current_id = match self.first_leaf_id {
+            Some(id) => id,
+            None => return results,
+        };
+
+        loop {
+            let leaf = match self.nodes.get(&current_id) {
+                Some(node) => node,
+                None => break,
+            };
+
+            for i in 0..leaf.keys.len() {
+                let key = &leaf.keys[i];
+                if key.partial_cmp(end_key).unwrap() <= std::cmp::Ordering::Equal {
+                    results.push((key.clone(), leaf.values[i].clone()));
+                } else {
+                    return results; // Past the end
+                }
+            }
+
+            match leaf.next_leaf {
+                Some(next_id) => current_id = next_id,
+                None => break,
+            }
+        }
+        results
+    }
+
     /// Get all entries in sorted order
     pub fn scan_all(&self) -> Vec<(K, V)> {
         let mut results = Vec::new();
@@ -549,5 +606,23 @@ mod tests {
         // Range with no matching values
         let results = tree.range_scan(&12, &18);
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_btree_scan_from_to() {
+        let mut tree = BTree::new(5).unwrap();
+        for i in vec![10, 20, 30, 40, 50] {
+            tree.insert(i, i);
+        }
+
+        // scan_from(25) -> 30, 40, 50
+        let results = tree.scan_from(&25);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, 30);
+
+        // scan_to(35) -> 10, 20, 30
+        let results = tree.scan_to(&35);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[2].0, 30);
     }
 }

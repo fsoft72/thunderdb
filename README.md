@@ -100,11 +100,11 @@ Copy `config.example.json` to `config.json` and adjust settings:
 **Current Phase**: MVP Development
 
 - [x] Project setup and configuration
-- [ ] Storage layer (Value, RAT, data.bin, TableEngine)
-- [ ] B-Tree indexing
-- [ ] Direct API
-- [ ] SQL parser
-- [ ] REPL interface
+- [x] Storage layer (Value, RAT, data.bin, TableEngine)
+- [x] B-Tree indexing
+- [x] Direct API
+- [x] SQL parser
+- [x] REPL interface
 - [ ] Testing and benchmarks
 
 ## Testing

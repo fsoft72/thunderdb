@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ThunderDB WASM Example</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        pre {
+            background-color: #f4f4f4;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .container {
+            border: 1px solid #ddd;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 { color: #2c3e50; }
+        .status { font-weight: bold; }
+        .success { color: #27ae60; }
+        .error { color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ThunderDB WASM Example</h1>
+        <p>This page demonstrates ThunderDB running in the browser via WebAssembly.</p>
+        
+        <div id="status" class="status">Initializing...</div>
+        
+        <h3>Output:</h3>
+        <pre id="output">Loading WASM module...</pre>
+
+        <h3>Controls:</h3>
+        <input type="text" id="queryInput" placeholder="Enter SQL query..." style="width: 70%; padding: 8px;">
+        <button id="runBtn" style="padding: 8px 16px;">Run Query</button>
+    </div>
+
+    <script type="module">
+        import init, { ThunderDBWasm } from '../pkg/thunderdb.js';
+
+        async function run() {
+            try {
+                // Initialize the WASM module
+                await init();
+                
+                const statusEl = document.getElementById('status');
+                const outputEl = document.getElementById('output');
+                const queryInput = document.getElementById('queryInput');
+                const runBtn = document.getElementById('runBtn');
+
+                statusEl.textContent = 'ThunderDB WASM Loaded Successfully!';
+                statusEl.className = 'status success';
+                
+                // Instantiate ThunderDB
+                const db = new ThunderDBWasm();
+                outputEl.textContent = `ThunderDB Version: ${db.version()}
+Ready for queries.`;
+
+                runBtn.addEventListener('click', () => {
+                    const sql = queryInput.value;
+                    if (sql) {
+                        const result = db.query(sql);
+                        outputEl.textContent += `
+
+> ${sql}
+${result}`;
+                    }
+                });
+
+            } catch (err) {
+                console.error(err);
+                const statusEl = document.getElementById('status');
+                statusEl.textContent = 'Error loading WASM: ' + err.message;
+                statusEl.className = 'status error';
+            }
+        }
+
+        run();
+    </script>
+</body>
+</html>

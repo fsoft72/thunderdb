@@ -179,7 +179,7 @@ pub fn apply_filters(
 /// # Returns
 /// Best column to use for index lookup, if any
 pub fn choose_index(filters: &[Filter], available_indices: &[String]) -> Option<(String, Operator)> {
-    // Priority: Equals > Range operators > others
+    // Priority 1: Equals
     for filter in filters {
         if available_indices.contains(&filter.column) {
             if matches!(filter.operator, Operator::Equals(_)) {
@@ -188,11 +188,24 @@ pub fn choose_index(filters: &[Filter], available_indices: &[String]) -> Option<
         }
     }
 
-    // Check for range operators
+    // Priority 2: Range operators and Prefix LIKE
     for filter in filters {
         if available_indices.contains(&filter.column) {
-            if filter.operator.can_use_index() {
-                return Some((filter.column.clone(), filter.operator.clone()));
+            match &filter.operator {
+                Operator::GreaterThan(_) | Operator::GreaterThanOrEqual(_) |
+                Operator::LessThan(_) | Operator::LessThanOrEqual(_) |
+                Operator::Between(_, _) => {
+                    return Some((filter.column.clone(), filter.operator.clone()));
+                }
+                Operator::Like(pattern) => {
+                    use crate::index::LikePattern;
+                    if let Ok(lp) = LikePattern::parse(pattern) {
+                        if lp.can_use_index() {
+                            return Some((filter.column.clone(), filter.operator.clone()));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

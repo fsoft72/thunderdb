@@ -127,6 +127,60 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Search for rows where column > value or column >= value
+    pub fn greater_than(&self, column_name: &str, value: &Value, inclusive: bool) -> Result<Vec<u64>> {
+        if let Some(index) = self.indices.get(column_name) {
+            let results = index.scan_from(value);
+            let mut row_ids = Vec::new();
+            for (key, row_id) in results {
+                if inclusive || key.partial_cmp(value).unwrap() > std::cmp::Ordering::Equal {
+                    row_ids.push(row_id);
+                }
+            }
+            Ok(row_ids)
+        } else {
+            Err(Error::Index(format!("No index on column: {}", column_name)))
+        }
+    }
+
+    /// Search for rows where column < value or column <= value
+    pub fn less_than(&self, column_name: &str, value: &Value, inclusive: bool) -> Result<Vec<u64>> {
+        if let Some(index) = self.indices.get(column_name) {
+            let results = index.scan_to(value);
+            let mut row_ids = Vec::new();
+            for (key, row_id) in results {
+                if inclusive || key.partial_cmp(value).unwrap() < std::cmp::Ordering::Equal {
+                    row_ids.push(row_id);
+                }
+            }
+            Ok(row_ids)
+        } else {
+            Err(Error::Index(format!("No index on column: {}", column_name)))
+        }
+    }
+
+    /// Search for rows matching a prefix (LIKE 'abc%')
+    pub fn prefix_search(&self, column_name: &str, prefix: &str) -> Result<Vec<u64>> {
+        use crate::index::LikePattern;
+        let pattern = LikePattern::Prefix(prefix.to_string());
+        if let Some((start, end)) = pattern.get_range_bounds() {
+            let start_val = Value::Varchar(start);
+            let end_val = Value::Varchar(end);
+            if let Some(index) = self.indices.get(column_name) {
+                let results = index.range_scan(&start_val, &end_val);
+                // Filter out the 'end' boundary which is exclusive for prefix matches
+                Ok(results.into_iter()
+                    .filter(|(k, _)| k.partial_cmp(&end_val).unwrap() < std::cmp::Ordering::Equal)
+                    .map(|(_, row_id)| row_id)
+                    .collect())
+            } else {
+                Err(Error::Index(format!("No index on column: {}", column_name)))
+            }
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     /// Search for rows matching a value in a specific column
     ///
     /// # Arguments
@@ -191,13 +245,31 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Load all indices from disk
+    /// Load all indices from disk by scanning the index directory
     pub fn load(&mut self) -> Result<()> {
-        for column_name in self.indexed_columns.clone() {
-            let path = self.get_index_path(&column_name);
-            if path.exists() {
-                let index = load_index(&path)?;
-                self.indices.insert(column_name, index);
+        if ! self.index_dir.exists() {
+            return Ok(());
+        }
+
+        let prefix = format!("{}_", self.table_name);
+        let entries = std::fs::read_dir(&self.index_dir)?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                if filename.starts_with(&prefix) && filename.ends_with(".idx") {
+                    // Extract column name: {table_name}_{column_name}.idx
+                    let col_part = &filename[prefix.len()..filename.len() - 4];
+                    let column_name = col_part.to_string();
+
+                    if ! self.indices.contains_key(&column_name) {
+                        let index = load_index(&path)?;
+                        self.indices.insert(column_name.clone(), index);
+                        if ! self.indexed_columns.contains(&column_name) {
+                            self.indexed_columns.push(column_name);
+                        }
+                    }
+                }
             }
         }
         Ok(())

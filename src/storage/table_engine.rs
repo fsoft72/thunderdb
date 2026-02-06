@@ -223,6 +223,17 @@ impl TableEngine {
             // Update RAT with new position (now allowed because it's deleted)
             self.rat.insert(row_id, new_offset, new_length)?;
 
+            // Update indices
+            if ! self.index_manager.indexed_columns().is_empty() {
+                let mut mapping = std::collections::HashMap::new();
+                if let Some(schema) = &self.schema {
+                    for (i, col) in schema.columns.iter().enumerate() {
+                        mapping.insert(col.name.clone(), i);
+                    }
+                }
+                self.index_manager.insert_row(&row, &mapping)?;
+            }
+
             Ok(true)
         } else {
             Ok(false)
@@ -243,6 +254,9 @@ impl TableEngine {
 
             // Mark as deleted in RAT
             self.rat.delete(row_id);
+
+            // Mark as deleted in indices
+            self.index_manager.delete_row(row_id)?;
 
             Ok(true)
         } else {
@@ -319,6 +333,52 @@ impl TableEngine {
         self.flush()?;
 
         Ok(())
+    }
+
+    /// Greater than search using an index
+    pub fn greater_than_by_index(
+        &mut self,
+        column_name: &str,
+        value: &Value,
+        inclusive: bool,
+    ) -> Result<Vec<Row>> {
+        let row_ids = self.index_manager.greater_than(column_name, value, inclusive)?;
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for row_id in row_ids {
+            if let Some(row) = self.get_by_id(row_id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Less than search using an index
+    pub fn less_than_by_index(
+        &mut self,
+        column_name: &str,
+        value: &Value,
+        inclusive: bool,
+    ) -> Result<Vec<Row>> {
+        let row_ids = self.index_manager.less_than(column_name, value, inclusive)?;
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for row_id in row_ids {
+            if let Some(row) = self.get_by_id(row_id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Prefix search using an index
+    pub fn prefix_search_by_index(&mut self, column_name: &str, prefix: &str) -> Result<Vec<Row>> {
+        let row_ids = self.index_manager.prefix_search(column_name, prefix)?;
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for row_id in row_ids {
+            if let Some(row) = self.get_by_id(row_id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     /// Search for rows matching a value using an index

@@ -12,6 +12,7 @@ pub mod storage;
 pub mod index;
 pub mod query;
 pub mod parser;
+pub mod wasm;
 
 #[cfg(feature = "repl")]
 pub mod repl;
@@ -195,6 +196,22 @@ impl DirectDataAccess for Database {
             match op {
                 Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
                 Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
+                Operator::GreaterThan(val) => table_engine.greater_than_by_index(&col, &val, false)?,
+                Operator::GreaterThanOrEqual(val) => table_engine.greater_than_by_index(&col, &val, true)?,
+                Operator::LessThan(val) => table_engine.less_than_by_index(&col, &val, false)?,
+                Operator::LessThanOrEqual(val) => table_engine.less_than_by_index(&col, &val, true)?,
+                Operator::Like(pattern) => {
+                    use crate::index::LikePattern;
+                    if let Ok(lp) = LikePattern::parse(&pattern) {
+                        if let Some(prefix) = lp.get_prefix() {
+                            table_engine.prefix_search_by_index(&col, prefix)?
+                        } else {
+                            table_engine.scan_all()?
+                        }
+                    } else {
+                        table_engine.scan_all()?
+                    }
+                }
                 _ => table_engine.scan_all()?, // Fallback
             }
         } else {
