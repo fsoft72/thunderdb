@@ -9,3 +9,5 @@ pub mod validator;
 pub mod executor;
 
 pub use token::{Token, Tokenizer};
+pub use ast::*;
+pub use parser::{Parser, parse_sql};

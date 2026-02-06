@@ -268,3 +268,50 @@ The query layer enables:
 - Execution statistics for monitoring
 
 Next: Phase 4 - SQL Parser
+
+---
+
+## 2026-02-06 - Phase 4: SQL Parser (Steps 4.1-4.2)
+
+### Step 4.1: SQL Tokenizer
+- Complete SQL lexer with 30+ token types
+- Keywords: SELECT, INSERT, UPDATE, DELETE, FROM, WHERE, INTO, VALUES, SET, AND, OR, NOT, LIKE, IN, BETWEEN, IS, NULL, ORDER BY, LIMIT, OFFSET, ASC, DESC
+- Operators: =, !=, <>, <, <=, >, >=, +, -, *, /
+- Literals: Number (int/float), String (with escapes), Identifier
+- Delimiters: (), comma, semicolon
+- Comments: line (--) and block (/* */)
+- Case-insensitive keywords
+- String escape sequences: \n, \t, \\, \', \"
+- ORDER BY special handling (two-word keyword)
+- Comprehensive tests: 13 tests
+
+### Step 4.2: AST & Parser
+- Abstract Syntax Tree definitions:
+  - Statement enum: Select, Insert, Update, Delete
+  - Expression types: Literal, Column, BinaryOp, UnaryOp, In, Between, IsNull, IsNotNull, Like
+  - BinaryOperator: Equals, NotEquals, comparison, logical (And/Or), arithmetic
+  - UnaryOperator: Not, Minus
+- Recursive descent parser:
+  - Operator precedence handling (OR < AND < comparison < term < factor < unary)
+  - SELECT: columns, FROM, WHERE, ORDER BY, LIMIT, OFFSET
+  - INSERT: INTO table VALUES (...)
+  - UPDATE: table SET assignments WHERE
+  - DELETE: FROM table WHERE
+  - Complex WHERE clauses with AND/OR
+  - IN, BETWEEN, LIKE, IS NULL support
+- parse_sql() convenience function
+- Comprehensive tests: 17 tests (AST + parser)
+
+Features:
+- Full SQL parsing for DML statements
+- Proper operator precedence
+- Complex expression support (nested AND/OR)
+- Pattern matching (LIKE)
+- Range queries (BETWEEN, IN)
+- NULL handling (IS NULL, IS NOT NULL)
+- Sorting (ORDER BY ASC/DESC)
+- Pagination (LIMIT, OFFSET)
+
+All 181 tests passing (164 previous + 17 new) ✓
+
+Next: Steps 4.3-4.4 - Validator & Executor
