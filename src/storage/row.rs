@@ -16,6 +16,27 @@ impl Row {
         Self { row_id, values }
     }
 
+    /// Write row directly to a writer to avoid allocations
+    pub fn write_to<W: std::io::Write>(&self, writer: &mut W) -> Result<usize> {
+        let mut bytes_written = 0;
+
+        // Write row ID
+        writer.write_all(&self.row_id.to_le_bytes())?;
+        bytes_written += 8;
+
+        // Write value count
+        let value_count = self.values.len() as u32;
+        writer.write_all(&value_count.to_le_bytes())?;
+        bytes_written += 4;
+
+        // Write each value
+        for value in &self.values {
+            bytes_written += value.write_to(writer)?;
+        }
+
+        Ok(bytes_written)
+    }
+
     /// Serialize row to bytes
     ///
     /// Format:
@@ -25,20 +46,8 @@ impl Row {
     ///
     /// Total length prefix is NOT included (managed by DataFile)
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        // Write row ID
-        bytes.extend_from_slice(&self.row_id.to_le_bytes());
-
-        // Write value count
-        let value_count = self.values.len() as u32;
-        bytes.extend_from_slice(&value_count.to_le_bytes());
-
-        // Write each value
-        for value in &self.values {
-            bytes.extend_from_slice(&value.to_bytes());
-        }
-
+        let mut bytes = Vec::with_capacity(12 + self.values.len() * 8);
+        self.write_to(&mut bytes).unwrap();
         bytes
     }
 

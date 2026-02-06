@@ -32,6 +32,49 @@ const TYPE_TIMESTAMP: u8 = 6;
 const TYPE_NULL: u8 = 0;
 
 impl Value {
+    /// Write value directly to a writer to avoid allocations
+    pub fn write_to<W: std::io::Write>(&self, writer: &mut W) -> Result<usize> {
+        match self {
+            Value::Int32(v) => {
+                writer.write_all(&[TYPE_INT32])?;
+                writer.write_all(&v.to_le_bytes())?;
+                Ok(5)
+            }
+            Value::Int64(v) => {
+                writer.write_all(&[TYPE_INT64])?;
+                writer.write_all(&v.to_le_bytes())?;
+                Ok(9)
+            }
+            Value::Float32(v) => {
+                writer.write_all(&[TYPE_FLOAT32])?;
+                writer.write_all(&v.to_le_bytes())?;
+                Ok(5)
+            }
+            Value::Float64(v) => {
+                writer.write_all(&[TYPE_FLOAT64])?;
+                writer.write_all(&v.to_le_bytes())?;
+                Ok(9)
+            }
+            Value::Varchar(s) => {
+                writer.write_all(&[TYPE_VARCHAR])?;
+                let str_bytes = s.as_bytes();
+                let len = str_bytes.len() as u32;
+                writer.write_all(&len.to_le_bytes())?;
+                writer.write_all(str_bytes)?;
+                Ok(1 + 4 + str_bytes.len())
+            }
+            Value::Timestamp(v) => {
+                writer.write_all(&[TYPE_TIMESTAMP])?;
+                writer.write_all(&v.to_le_bytes())?;
+                Ok(9)
+            }
+            Value::Null => {
+                writer.write_all(&[TYPE_NULL])?;
+                Ok(1)
+            }
+        }
+    }
+
     /// Serialize value to bytes
     ///
     /// Format: [type_tag: u8] [data: variable length]
@@ -43,42 +86,40 @@ impl Value {
     /// - Timestamp: [6] [8 bytes]
     /// - Null: [0]
     pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(9); // Pre-allocate for common types
         match self {
             Value::Int32(v) => {
-                let mut bytes = vec![TYPE_INT32];
+                bytes.push(TYPE_INT32);
                 bytes.extend_from_slice(&v.to_le_bytes());
-                bytes
             }
             Value::Int64(v) => {
-                let mut bytes = vec![TYPE_INT64];
+                bytes.push(TYPE_INT64);
                 bytes.extend_from_slice(&v.to_le_bytes());
-                bytes
             }
             Value::Float32(v) => {
-                let mut bytes = vec![TYPE_FLOAT32];
+                bytes.push(TYPE_FLOAT32);
                 bytes.extend_from_slice(&v.to_le_bytes());
-                bytes
             }
             Value::Float64(v) => {
-                let mut bytes = vec![TYPE_FLOAT64];
+                bytes.push(TYPE_FLOAT64);
                 bytes.extend_from_slice(&v.to_le_bytes());
-                bytes
             }
             Value::Varchar(s) => {
-                let mut bytes = vec![TYPE_VARCHAR];
+                bytes.push(TYPE_VARCHAR);
                 let str_bytes = s.as_bytes();
                 let len = str_bytes.len() as u32;
                 bytes.extend_from_slice(&len.to_le_bytes());
                 bytes.extend_from_slice(str_bytes);
-                bytes
             }
             Value::Timestamp(v) => {
-                let mut bytes = vec![TYPE_TIMESTAMP];
+                bytes.push(TYPE_TIMESTAMP);
                 bytes.extend_from_slice(&v.to_le_bytes());
-                bytes
             }
-            Value::Null => vec![TYPE_NULL],
+            Value::Null => {
+                bytes.push(TYPE_NULL);
+            }
         }
+        bytes
     }
 
     /// Deserialize value from bytes

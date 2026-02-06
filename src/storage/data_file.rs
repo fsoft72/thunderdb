@@ -19,6 +19,8 @@ pub struct DataFile {
     file: File,
     current_offset: u64,
     fsync_on_write: bool,
+    write_buffer: Vec<u8>,
+    read_buffer: Vec<u8>,
 }
 
 impl DataFile {
@@ -44,6 +46,8 @@ impl DataFile {
             file,
             current_offset,
             fsync_on_write,
+            write_buffer: Vec::with_capacity(1024),
+            read_buffer: Vec::with_capacity(1024),
         })
     }
 
@@ -55,8 +59,10 @@ impl DataFile {
     /// # Returns
     /// (offset, length) tuple indicating where the row was written
     pub fn append_row(&mut self, row: &Row) -> Result<(u64, u32)> {
-        let row_bytes = row.to_bytes();
-        let length = row_bytes.len() as u32;
+        // We still need to know the length before writing to put it in the header
+        self.write_buffer.clear();
+        row.write_to(&mut self.write_buffer)?;
+        let length = self.write_buffer.len() as u32;
 
         // Seek to end of file
         self.file.seek(SeekFrom::End(0))?;
@@ -69,7 +75,7 @@ impl DataFile {
         self.file.write_all(&length.to_le_bytes())?;
 
         // Write row data
-        self.file.write_all(&row_bytes)?;
+        self.file.write_all(&self.write_buffer)?;
 
         if self.fsync_on_write {
             self.file.sync_all()?;
@@ -93,17 +99,22 @@ impl DataFile {
         // Seek to offset
         self.file.seek(SeekFrom::Start(offset))?;
 
-        // Read status marker
-        let mut marker = [0u8; 1];
-        self.file.read_exact(&mut marker)?;
+        // Read marker (1) + length (4) + row data (length) in one go
+        let total_to_read = 1 + 4 + length as usize;
+        if self.read_buffer.len() < total_to_read {
+            self.read_buffer.resize(total_to_read, 0);
+        }
+        
+        self.file.read_exact(&mut self.read_buffer[..total_to_read])?;
 
-        if marker[0] == TOMBSTONE_MARKER {
+        // Check status marker
+        if self.read_buffer[0] == TOMBSTONE_MARKER {
             return Ok(None);
         }
 
-        // Read length (verify it matches)
+        // Verify length prefix matches what we expect from RAT
         let mut length_buf = [0u8; 4];
-        self.file.read_exact(&mut length_buf)?;
+        length_buf.copy_from_slice(&self.read_buffer[1..5]);
         let stored_length = u32::from_le_bytes(length_buf);
 
         if stored_length != length {
@@ -113,12 +124,8 @@ impl DataFile {
             )));
         }
 
-        // Read row data
-        let mut row_bytes = vec![0u8; length as usize];
-        self.file.read_exact(&mut row_bytes)?;
-
-        // Deserialize row
-        let row = Row::from_bytes(&row_bytes)?;
+        // Deserialize row from the remaining buffer
+        let row = Row::from_bytes(&self.read_buffer[5..total_to_read])?;
 
         Ok(Some(row))
     }
@@ -157,6 +164,42 @@ impl DataFile {
         &self.path
     }
 
+    /// Scan all active rows in the file (more efficient than individual reads)
+    pub fn scan_rows(&mut self) -> Result<Vec<Row>> {
+        let mut results = Vec::new();
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut row_buffer = Vec::with_capacity(1024);
+        
+        loop {
+            // Read status marker
+            let mut marker = [0u8; 1];
+            match self.file.read_exact(&mut marker) {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+
+            // Read length
+            let mut length_buf = [0u8; 4];
+            self.file.read_exact(&mut length_buf)?;
+            let length = u32::from_le_bytes(length_buf) as usize;
+
+            if marker[0] == TOMBSTONE_MARKER {
+                // Skip deleted row
+                self.file.seek(SeekFrom::Current(length as i64))?;
+            } else {
+                // Read and deserialize active row
+                if row_buffer.len() < length {
+                    row_buffer.resize(length, 0);
+                }
+                self.file.read_exact(&mut row_buffer[..length])?;
+                results.push(Row::from_bytes(&row_buffer[..length])?);
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Scan all rows in the file (for recovery/rebuild)
     ///
     /// Returns vector of (offset, length, row_id, deleted) tuples
@@ -182,18 +225,17 @@ impl DataFile {
             self.file.read_exact(&mut length_buf)?;
             let length = u32::from_le_bytes(length_buf);
 
-            // Read row data to extract row_id
-            let mut row_bytes = vec![0u8; length as usize];
-            self.file.read_exact(&mut row_bytes)?;
+            // Read only row_id (first 8 bytes of row data) to save I/O and allocations
+            let mut row_id_buf = [0u8; 8];
+            self.file.read_exact(&mut row_id_buf)?;
+            let row_id = u64::from_le_bytes(row_id_buf);
 
-            // Extract row_id (first 8 bytes of row data)
-            if row_bytes.len() >= 8 {
-                let mut row_id_buf = [0u8; 8];
-                row_id_buf.copy_from_slice(&row_bytes[0..8]);
-                let row_id = u64::from_le_bytes(row_id_buf);
-
-                results.push((offset, length, row_id, deleted));
+            // Seek past the rest of the row data
+            if length > 8 {
+                self.file.seek(SeekFrom::Current((length - 8) as i64))?;
             }
+
+            results.push((offset, length, row_id, deleted));
 
             offset += 1 + 4 + length as u64;
         }

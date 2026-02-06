@@ -216,18 +216,20 @@ where
             }
 
             // Internal node - find which child to follow
-            // For internal nodes: if key >= keys[i], we go to the right child
-            let mut child_idx = 0;
-            for (i, node_key) in node.keys.iter().enumerate() {
-                match key.partial_cmp(node_key).unwrap() {
-                    std::cmp::Ordering::Less => {
-                        child_idx = i;
-                        break;
-                    }
-                    _ => {
-                        child_idx = i + 1;
-                    }
-                }
+            // For internal nodes: if key < keys[i], we go to children[i]
+            // if key >= keys[i], we continue to next key
+            let pos = node.find_position(key);
+            
+            // If find_position returns an index where key is EQUAL or LESS, 
+            // that's the child index we want, EXCEPT if it's an exact match
+            // where we want to go to the right child in some B-Tree variants.
+            // But here, find_position gives us the first index where keys[idx] >= key.
+            // If keys[idx] > key, child_idx is idx.
+            // If keys[idx] == key, child_idx is idx + 1 (to handle duplicates/range).
+            
+            let mut child_idx = pos;
+            if pos < node.keys.len() && node.keys[pos].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal {
+                child_idx = pos + 1;
             }
 
             current_id = node.children[child_idx];

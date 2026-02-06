@@ -31,6 +31,10 @@ name = "select_bench"
 harness = false
 
 [[bench]]
+name = "indexed_select_bench"
+harness = false
+
+[[bench]]
 name = "index_bench"
 harness = false
 

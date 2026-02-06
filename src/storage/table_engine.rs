@@ -1,6 +1,7 @@
 use crate::config::StorageConfig;
 use crate::error::{Result, Error};
 use crate::storage::{DataFile, RecordAddressTable, Row, Value};
+use crate::index::IndexManager;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Serialize, Deserialize};
@@ -24,12 +25,14 @@ pub struct TableSchema {
 /// - data.bin (append-only row storage)
 /// - rat.bin (Record Address Table)
 /// - schema.json (Table metadata)
+/// - indices/ directory
 /// - Auto-generated row IDs
 pub struct TableEngine {
     name: String,
     table_dir: PathBuf,
     data_file: DataFile,
     rat: RecordAddressTable,
+    index_manager: IndexManager,
     schema: Option<TableSchema>,
     next_row_id: AtomicU64,
     config: StorageConfig,
@@ -62,6 +65,11 @@ impl TableEngine {
         let rat_path = table_dir.join("rat.bin");
         let rat = RecordAddressTable::load(&rat_path)?;
 
+        // Initialize Index Manager
+        let index_dir = table_dir.join("indices");
+        let mut index_manager = IndexManager::new(name, &index_dir, 100)?; // Default order 100
+        index_manager.load()?;
+
         // Load Schema
         let schema_path = table_dir.join("schema.json");
         let schema = if schema_path.exists() {
@@ -80,6 +88,7 @@ impl TableEngine {
             table_dir,
             data_file,
             rat,
+            index_manager,
             schema,
             next_row_id,
             config,
@@ -113,6 +122,8 @@ impl TableEngine {
         let table_dir = base_dir.join(name);
         if ! table_dir.exists() {
             std::fs::create_dir_all(&table_dir)?;
+            // Also create indices directory
+            std::fs::create_dir_all(table_dir.join("indices"))?;
         }
 
         Self::open(name, base_dir, config)
@@ -137,6 +148,17 @@ impl TableEngine {
 
         // Insert into RAT
         self.rat.insert(row_id, offset, length)?;
+
+        // Update indices
+        if ! self.index_manager.indexed_columns().is_empty() {
+            let mut mapping = std::collections::HashMap::new();
+            if let Some(schema) = &self.schema {
+                for (i, col) in schema.columns.iter().enumerate() {
+                    mapping.insert(col.name.clone(), i);
+                }
+            }
+            self.index_manager.insert_row(&row, &mapping)?;
+        }
 
         Ok(row_id)
     }
@@ -237,16 +259,9 @@ impl TableEngine {
     ///
     /// Returns all non-deleted rows
     pub fn scan_all(&mut self) -> Result<Vec<Row>> {
-        let row_ids = self.active_row_ids();
-        let mut rows = Vec::with_capacity(row_ids.len());
-
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-
-        Ok(rows)
+        // Sequential scan of the data file is much faster than random access
+        // because it avoids seeks and benefits from OS prefetching.
+        self.data_file.scan_rows()
     }
 
     /// Get table statistics
@@ -304,6 +319,49 @@ impl TableEngine {
         self.flush()?;
 
         Ok(())
+    }
+
+    /// Search for rows matching a value using an index
+    pub fn search_by_index(&mut self, column_name: &str, value: &Value) -> Result<Vec<Row>> {
+        let row_ids = self.index_manager.search(column_name, value)?;
+        let mut rows = Vec::with_capacity(row_ids.len());
+
+        for row_id in row_ids {
+            if let Some(row) = self.get_by_id(row_id)? {
+                rows.push(row);
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Range search using an index
+    pub fn range_search_by_index(
+        &mut self,
+        column_name: &str,
+        start_value: &Value,
+        end_value: &Value,
+    ) -> Result<Vec<Row>> {
+        let row_ids = self.index_manager.range_query(column_name, start_value, end_value)?;
+        let mut rows = Vec::with_capacity(row_ids.len());
+
+        for row_id in row_ids {
+            if let Some(row) = self.get_by_id(row_id)? {
+                rows.push(row);
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Get index manager
+    pub fn index_manager(&self) -> &IndexManager {
+        &self.index_manager
+    }
+
+    /// Get index manager (mutable)
+    pub fn index_manager_mut(&mut self) -> &mut IndexManager {
+        &mut self.index_manager
     }
 
     /// Get table name

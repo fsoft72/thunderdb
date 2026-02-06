@@ -21,7 +21,7 @@ pub use config::{DatabaseConfig, load_config, save_config};
 pub use error::{Error, Result};
 pub use storage::{Value, Row, TableEngine};
 pub use index::{IndexManager};
-pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder};
+pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters};
 pub use parser::{parse_sql, Statement};
 
 /// ThunderDB version
@@ -189,31 +189,22 @@ impl DirectDataAccess for Database {
             }
         }
 
-        let mut rows = table_engine.scan_all()?;
+        // Try to use an index
+        let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
+        let mut rows = if let Some((col, op)) = choose_index(&filters, &indexed_columns) {
+            match op {
+                Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
+                Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
+                _ => table_engine.scan_all()?, // Fallback
+            }
+        } else {
+            table_engine.scan_all()?
+        };
 
-        // Apply filters
+        // Apply remaining filters (the ones not handled by index)
         if !filters.is_empty() {
             rows.retain(|row| {
-                filters.iter().all(|filter| {
-                    // Try to map column name
-                    let col_idx = if let Some(&idx) = column_mapping.get(&filter.column) {
-                        Some(idx)
-                    } else if filter.column.starts_with("col") {
-                        filter.column[3..].parse::<usize>().ok()
-                    } else {
-                        None
-                    };
-
-                    if let Some(idx) = col_idx {
-                        if let Some(value) = row.values.get(idx) {
-                            return filter.matches(value);
-                        }
-                    }
-                    
-                    // If we can't map the column, we ignore the filter or return true.
-                    // To be safe for queries that might use unknown columns, return true.
-                    true
-                })
+                apply_filters(row, &filters, &column_mapping)
             });
         }
 
