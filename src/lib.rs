@@ -51,13 +51,15 @@ impl Database {
     ///
     /// # Returns
     /// A Database instance ready for operations
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn open<P: AsRef<std::path::Path>>(data_dir: P) -> Result<Self> {
         let data_dir = data_dir.as_ref();
 
-        // Create data directory if it doesn't exist
-        if ! data_dir.exists() {
-            std::fs::create_dir_all(data_dir)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Create data directory if it doesn't exist
+            if ! data_dir.exists() {
+                std::fs::create_dir_all(data_dir)?;
+            }
         }
 
         // Load or create configuration
@@ -67,6 +69,7 @@ impl Database {
         } else {
             let mut config = DatabaseConfig::default();
             config.storage.data_dir = data_dir.to_string_lossy().to_string();
+            #[cfg(not(target_arch = "wasm32"))]
             save_config(&config, &config_path)?;
             config
         };
@@ -81,12 +84,15 @@ impl Database {
         })
     }
 
-    /// Open an in-memory database (for WASM or testing)
-    #[cfg(target_arch = "wasm32")]
+    /// Open an in-memory database
     pub fn open_in_memory() -> Result<Self> {
+        let mut config = DatabaseConfig::default();
+        config.storage.in_memory = true;
+        config.storage.data_dir = ":memory:".to_string();
+
         Ok(Self {
-            config: DatabaseConfig::default(),
-            data_dir: PathBuf::from("/memory"),
+            config,
+            data_dir: PathBuf::from(":memory:"),
             tables: HashMap::new(),
         })
     }
@@ -96,13 +102,22 @@ impl Database {
         &self.config
     }
 
+    /// Get database configuration (mutable)
+    pub fn config_mut(&mut self) -> &mut DatabaseConfig {
+        &mut self.config
+    }
+
     /// Get a table, loading it if necessary. Fails if table doesn't exist.
     pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
-            #[cfg(not(target_arch = "wasm32"))]
-            let table = TableEngine::open(name, &self.data_dir, self.config.storage.clone())?;
-            #[cfg(target_arch = "wasm32")]
-            let table = TableEngine::open_in_memory(name, self.config.storage.clone())?;
+            let table = if self.config.storage.in_memory {
+                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                { TableEngine::open(name, &self.data_dir, self.config.storage.clone())? }
+                #[cfg(target_arch = "wasm32")]
+                { TableEngine::open_in_memory(name, self.config.storage.clone())? }
+            };
             
             self.tables.insert(name.to_string(), table);
         }
@@ -112,10 +127,14 @@ impl Database {
     /// Create or get a table.
     pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
-            #[cfg(not(target_arch = "wasm32"))]
-            let table = TableEngine::create(name, &self.data_dir, self.config.storage.clone())?;
-            #[cfg(target_arch = "wasm32")]
-            let table = TableEngine::open_in_memory(name, self.config.storage.clone())?;
+            let table = if self.config.storage.in_memory {
+                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                { TableEngine::create(name, &self.data_dir, self.config.storage.clone())? }
+                #[cfg(target_arch = "wasm32")]
+                { TableEngine::open_in_memory(name, self.config.storage.clone())? }
+            };
 
             self.tables.insert(name.to_string(), table);
         }
@@ -139,14 +158,16 @@ impl Database {
         // Scan data directory for other tables
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
-                for entry in entries.flatten() {
-                    if let Ok(file_type) = entry.file_type() {
-                        if file_type.is_dir() {
-                            if let Some(name) = entry.file_name().to_str() {
-                                // Check if it's a valid table directory (contains data.bin)
-                                if entry.path().join("data.bin").exists() {
-                                    table_names.insert(name.to_string());
+            if self.data_dir.exists() && self.data_dir.to_string_lossy() != ":memory:" {
+                if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(file_type) = entry.file_type() {
+                            if file_type.is_dir() {
+                                if let Some(name) = entry.file_name().to_str() {
+                                    // Check if it's a valid table directory (contains data.bin)
+                                    if entry.path().join("data.bin").exists() {
+                                        table_names.insert(name.to_string());
+                                    }
                                 }
                             }
                         }
@@ -160,20 +181,65 @@ impl Database {
         result
     }
 
+    /// Save the database to disk (if it has a disk path)
+    pub fn save(&mut self) -> Result<()> {
+        if self.data_dir.to_string_lossy() == ":memory:" {
+            return Err(Error::Config("Cannot save a purely in-memory database without a data directory. Use open(path) with --memory instead.".to_string()));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Ensure data directory exists
+            if ! self.data_dir.exists() {
+                std::fs::create_dir_all(&self.data_dir)?;
+            }
+
+            // Save configuration
+            let config_path = self.data_dir.join("config.json");
+            save_config(&self.config, &config_path)?;
+
+            let all_tables = self.list_tables();
+            let base_dir = self.data_dir.clone();
+            for table_name in all_tables {
+                if ! self.tables.contains_key(&table_name) {
+                    // Load and save (effectively a no-op if it was already on disk, 
+                    // but ensures it's consistent if we changed something)
+                    let table = self.get_table_mut(&table_name)?;
+                    table.save_to_disk(&base_dir)?;
+                } else {
+                    let table = self.tables.get_mut(&table_name).unwrap();
+                    table.save_to_disk(&base_dir)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Drop a table
     pub fn drop_table(&mut self, name: &str) -> Result<()> {
         // Remove from memory
-        self.tables.remove(name);
+        let removed = self.tables.remove(name).is_some();
 
         // Remove from disk
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if self.data_dir.to_string_lossy() == ":memory:" {
+                if removed {
+                    return Ok(());
+                } else {
+                    return Err(Error::TableNotFound(name.to_string()));
+                }
+            }
+
             let table_dir = self.data_dir.join(name);
             if table_dir.exists() {
                 std::fs::remove_dir_all(table_dir)?;
-                return Ok(());
+                Ok(())
+            } else if !removed {
+                Err(Error::TableNotFound(name.to_string()))
             } else {
-                return Err(Error::TableNotFound(name.to_string()));
+                Ok(())
             }
         }
 

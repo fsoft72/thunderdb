@@ -116,13 +116,66 @@ impl TableEngine {
         })
     }
 
+    /// Load a table from disk into memory
+    pub fn load_to_memory<P: AsRef<Path>>(name: &str, base_dir: P, mut config: StorageConfig) -> Result<Self> {
+        let base_dir = base_dir.as_ref();
+        let table_dir = base_dir.join(name);
+
+        if ! table_dir.exists() || base_dir.to_string_lossy() == ":memory:" {
+            config.in_memory = true;
+            return Self::open_in_memory(name, config);
+        }
+
+        // Open disk-based table first to read its data
+        let mut disk_table = Self::open(name, base_dir, config.clone())?;
+        
+        // Create in-memory table
+        config.in_memory = true;
+        let mut mem_table = Self::open_in_memory(name, config)?;
+
+        // Copy schema
+        if let Some(schema) = disk_table.schema() {
+            mem_table.schema = Some(schema.clone());
+        }
+
+        // Copy all rows
+        let rows = disk_table.data_file.scan_rows()?;
+        for row in rows {
+            mem_table.insert_row(row.values)?;
+        }
+
+        // Copy indices if any
+        let indexed_columns = disk_table.index_manager.indexed_columns().to_vec();
+        for col in indexed_columns {
+            mem_table.index_manager.create_index(&col)?;
+        }
+
+        // Rebuild indices in memory
+        if ! mem_table.index_manager.indexed_columns().is_empty() {
+            let mut mapping = std::collections::HashMap::new();
+            if let Some(schema) = &mem_table.schema {
+                for (i, col) in schema.columns.iter().enumerate() {
+                    mapping.insert(col.name.clone(), i);
+                }
+            }
+            let rows = mem_table.scan_all()?;
+            for col in mem_table.index_manager.indexed_columns().to_vec() {
+                mem_table.index_manager.rebuild_index(&col, &rows, &mapping)?;
+            }
+        }
+
+        Ok(mem_table)
+    }
+
     /// Set table schema
     pub fn set_schema(&mut self, schema: TableSchema) -> Result<()> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let schema_path = self.table_dir.join("schema.json");
-            let content = serde_json::to_string_pretty(&schema)?;
-            std::fs::write(schema_path, content)?;
+        if ! self.config.in_memory {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let schema_path = self.table_dir.join("schema.json");
+                let content = serde_json::to_string_pretty(&schema)?;
+                std::fs::write(schema_path, content)?;
+            }
         }
         self.schema = Some(schema);
         Ok(())
@@ -322,6 +375,10 @@ impl TableEngine {
 
     /// Flush RAT to disk
     pub fn flush(&mut self) -> Result<()> {
+        if self.config.in_memory {
+            return Ok(());
+        }
+
         if self.rat.is_dirty() {
             let rat_path = self.table_dir.join("rat.bin");
             self.rat.save(rat_path)?;
@@ -460,6 +517,60 @@ impl TableEngine {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Save in-memory table to disk
+    pub fn save_to_disk<P: AsRef<Path>>(&mut self, base_dir: P) -> Result<()> {
+        let base_dir = base_dir.as_ref();
+        
+        // Create table directory if it doesn't exist
+        let table_dir = base_dir.join(&self.name);
+        if ! table_dir.exists() {
+            std::fs::create_dir_all(&table_dir)?;
+            std::fs::create_dir_all(table_dir.join("indices"))?;
+        }
+
+        // Create a temporary disk-based table engine to perform the save
+        let mut disk_config = self.config.clone();
+        disk_config.in_memory = false;
+        disk_config.data_dir = base_dir.to_string_lossy().to_string();
+
+        // We can't easily use TableEngine::create here because it might try to open if it exists
+        // and we want to overwrite/update it.
+        
+        // 1. Save Schema
+        if let Some(schema) = &self.schema {
+            let schema_path = table_dir.join("schema.json");
+            let content = serde_json::to_string_pretty(schema)?;
+            std::fs::write(schema_path, content)?;
+        }
+
+        // 2. Save Data (simplest is to just overwrite data.bin and rat.bin)
+        let data_path = table_dir.join("data.bin");
+        let mut disk_data_file = DataFile::open(&data_path, true)?;
+        
+        // We need to clear it if it exists
+        if data_path.exists() {
+            std::fs::write(&data_path, [])?; // Truncate
+            disk_data_file = DataFile::open(&data_path, true)?;
+        }
+
+        let mut disk_rat = RecordAddressTable::new();
+        let rows = self.scan_all()?;
+        for row in rows {
+            let (offset, length) = disk_data_file.append_row(&row)?;
+            disk_rat.insert(row.row_id, offset, length)?;
+        }
+
+        // 3. Save RAT
+        let rat_path = table_dir.join("rat.bin");
+        disk_rat.save(rat_path)?;
+
+        // 4. Save Indices
+        let index_dir = table_dir.join("indices");
+        self.index_manager.save_to(index_dir)?;
+
+        Ok(())
+    }
 }
 
 /// Table statistics
@@ -485,6 +596,7 @@ mod tests {
             fsync_on_write: false,
             fsync_interval_ms: 1000,
             max_data_file_size_mb: 1024,
+            in_memory: false,
         };
 
         TableEngine::create(name, &base_dir, config).unwrap()
@@ -602,6 +714,7 @@ mod tests {
             fsync_on_write: false,
             fsync_interval_ms: 1000,
             max_data_file_size_mb: 1024,
+            in_memory: false,
         };
 
         // Create table and insert data
@@ -670,6 +783,7 @@ mod tests {
             fsync_on_write: false,
             fsync_interval_ms: 1000,
             max_data_file_size_mb: 1024,
+            in_memory: false,
         };
 
         // Create table and insert data

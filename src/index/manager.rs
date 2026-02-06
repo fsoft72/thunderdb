@@ -247,10 +247,21 @@ impl IndexManager {
 
     /// Save all indices to disk
     pub fn flush(&self) -> Result<()> {
+        self.save_to(&self.index_dir)
+    }
+
+    /// Save all indices to a specific directory
+    pub fn save_to<P: AsRef<Path>>(&self, index_dir: P) -> Result<()> {
+        let index_dir = index_dir.as_ref();
+        
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if ! index_dir.exists() {
+                std::fs::create_dir_all(index_dir)?;
+            }
+
             for (column_name, index) in &self.indices {
-                let path = self.get_index_path(column_name);
+                let path = index_dir.join(format!("{}_{}.idx", self.table_name, column_name));
                 save_index(index, &path)?;
             }
         }

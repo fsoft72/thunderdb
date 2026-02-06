@@ -99,6 +99,12 @@ impl<'a> Repl<'a> {
                                 SpecialCommand::Stats(table) => {
                                     self.show_stats(&table);
                                 }
+                                SpecialCommand::Save => {
+                                    match self.database.save() {
+                                        Ok(()) => println!("Database saved successfully to: {}", self.database.config().storage.data_dir),
+                                        Err(e) => eprintln!("Error saving database: {}", e),
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -318,6 +324,7 @@ impl<'a> Repl<'a> {
         println!("    .tables            List all tables");
         println!("    .schema [table]    Show table schema");
         println!("    .stats [table]     Show table statistics");
+        println!("    .save              Save database to disk (when in memory mode)");
         println!("    .exit, .quit       Exit the REPL");
         println!();
         println!("  Tips:");
@@ -402,6 +409,11 @@ impl<'a> Repl<'a> {
             println!("Usage: .stats <table_name>");
         }
         println!();
+    }
+
+    /// Save the database
+    pub fn save(&mut self) -> Result<()> {
+        self.database.save()
     }
 }
 

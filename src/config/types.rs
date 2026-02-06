@@ -27,6 +27,10 @@ pub struct StorageConfig {
     /// Maximum size of data file in MB before rotation
     #[serde(default = "default_max_file_size")]
     pub max_data_file_size_mb: usize,
+
+    /// Whether to operate in memory-only mode
+    #[serde(default)]
+    pub in_memory: bool,
 }
 
 /// Index configuration
@@ -140,6 +144,7 @@ impl Default for DatabaseConfig {
                 fsync_on_write: false,
                 fsync_interval_ms: default_fsync_interval(),
                 max_data_file_size_mb: default_max_file_size(),
+                in_memory: false,
             },
             index: IndexConfig {
                 btree_order: default_btree_order(),

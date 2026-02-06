@@ -13,6 +13,8 @@ pub enum SpecialCommand {
     Schema(Option<String>),
     /// .stats [table] - Show table statistics
     Stats(Option<String>),
+    /// .save - Save database to disk (when in memory mode)
+    Save,
 }
 
 /// Parse a special command (starts with .)
@@ -34,6 +36,7 @@ pub fn parse_special_command(line: &str) -> Option<SpecialCommand> {
     match cmd.as_str() {
         "exit" | "quit" => Some(SpecialCommand::Exit),
         "help" => Some(SpecialCommand::Help),
+        "save" => Some(SpecialCommand::Save),
         "tables" => Some(SpecialCommand::Tables),
         "schema" => {
             let table = parts.get(1).map(|s| s.to_string());
