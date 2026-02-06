@@ -3,7 +3,9 @@
 // Manages multiple indices per table and coordinates index updates
 
 use crate::error::{Error, Result};
-use crate::index::{BTree, load_index, save_index};
+use crate::index::BTree;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::index::{load_index, save_index};
 use crate::storage::{Row, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,7 @@ pub struct IndexManager {
     table_name: String,
 
     /// Directory where index files are stored
+    #[allow(dead_code)]
     index_dir: PathBuf,
 
     /// Active indices: column_name -> BTree
@@ -39,8 +42,11 @@ impl IndexManager {
         let index_dir = index_dir.as_ref().to_path_buf();
 
         // Create index directory if it doesn't exist
-        if ! index_dir.exists() {
-            std::fs::create_dir_all(&index_dir)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if ! index_dir.exists() {
+                std::fs::create_dir_all(&index_dir)?;
+            }
         }
 
         Ok(Self {
@@ -87,9 +93,12 @@ impl IndexManager {
         self.indexed_columns.retain(|col| col != column_name);
 
         // Remove index file
-        let index_path = self.get_index_path(column_name);
-        if index_path.exists() {
-            std::fs::remove_file(index_path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let index_path = self.get_index_path(column_name);
+            if index_path.exists() {
+                std::fs::remove_file(index_path)?;
+            }
         }
 
         Ok(())
@@ -238,35 +247,41 @@ impl IndexManager {
 
     /// Save all indices to disk
     pub fn flush(&self) -> Result<()> {
-        for (column_name, index) in &self.indices {
-            let path = self.get_index_path(column_name);
-            save_index(index, &path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for (column_name, index) in &self.indices {
+                let path = self.get_index_path(column_name);
+                save_index(index, &path)?;
+            }
         }
         Ok(())
     }
 
     /// Load all indices from disk by scanning the index directory
     pub fn load(&mut self) -> Result<()> {
-        if ! self.index_dir.exists() {
-            return Ok(());
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if ! self.index_dir.exists() {
+                return Ok(());
+            }
 
-        let prefix = format!("{}_", self.table_name);
-        let entries = std::fs::read_dir(&self.index_dir)?;
+            let prefix = format!("{}_", self.table_name);
+            let entries = std::fs::read_dir(&self.index_dir)?;
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
-                if filename.starts_with(&prefix) && filename.ends_with(".idx") {
-                    // Extract column name: {table_name}_{column_name}.idx
-                    let col_part = &filename[prefix.len()..filename.len() - 4];
-                    let column_name = col_part.to_string();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                    if filename.starts_with(&prefix) && filename.ends_with(".idx") {
+                        // Extract column name: {table_name}_{column_name}.idx
+                        let col_part = &filename[prefix.len()..filename.len() - 4];
+                        let column_name = col_part.to_string();
 
-                    if ! self.indices.contains_key(&column_name) {
-                        let index = load_index(&path)?;
-                        self.indices.insert(column_name.clone(), index);
-                        if ! self.indexed_columns.contains(&column_name) {
-                            self.indexed_columns.push(column_name);
+                        if ! self.indices.contains_key(&column_name) {
+                            let index = load_index(&path)?;
+                            self.indices.insert(column_name.clone(), index);
+                            if ! self.indexed_columns.contains(&column_name) {
+                                self.indexed_columns.push(column_name);
+                            }
                         }
                     }
                 }
@@ -335,6 +350,7 @@ impl IndexManager {
     }
 
     /// Get path for an index file
+    #[allow(dead_code)]
     fn get_index_path(&self, column_name: &str) -> PathBuf {
         self.index_dir
             .join(format!("{}_{}.idx", self.table_name, column_name))

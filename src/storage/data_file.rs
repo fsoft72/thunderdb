@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::storage::row::Row;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -9,6 +9,7 @@ const TOMBSTONE_MARKER: u8 = 0xFF;
 const ACTIVE_MARKER: u8 = 0x00;
 
 enum DataFileBackend {
+    #[allow(dead_code)]
     File(File),
     Memory(Vec<u8>),
 }
@@ -35,24 +36,25 @@ impl DataFile {
     /// * `path` - Path to the data.bin file
     /// * `fsync_on_write` - Whether to call fsync after each write
     pub fn open<P: AsRef<Path>>(path: P, fsync_on_write: bool) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        let _path_buf = path.as_ref().to_path_buf();
+        let _fsync = fsync_on_write;
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let file = OpenOptions::new()
+            let file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(&path)?;
+                .open(&_path_buf)?;
 
             // Get current file size to know where to append
             let current_offset = file.metadata()?.len();
 
             Ok(Self {
-                path,
+                path: _path_buf,
                 backend: DataFileBackend::File(file),
                 current_offset,
-                fsync_on_write,
+                fsync_on_write: _fsync,
                 write_buffer: Vec::with_capacity(1024),
                 read_buffer: Vec::with_capacity(1024),
             })

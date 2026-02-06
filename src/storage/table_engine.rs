@@ -1,5 +1,7 @@
 use crate::config::StorageConfig;
-use crate::error::{Result, Error};
+use crate::error::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::error::Error;
 use crate::storage::{DataFile, RecordAddressTable, Row, Value};
 use crate::index::IndexManager;
 use std::path::{Path, PathBuf};
@@ -48,6 +50,7 @@ impl TableEngine {
     ///
     /// # Returns
     /// A Result with the TableEngine if it exists, or Error::TableNotFound
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig) -> Result<Self> {
         let base_dir = base_dir.as_ref();
 
@@ -95,11 +98,32 @@ impl TableEngine {
         })
     }
 
+    /// Open an in-memory table
+    pub fn open_in_memory(name: &str, config: StorageConfig) -> Result<Self> {
+        let data_file = DataFile::open_in_memory()?;
+        let rat = RecordAddressTable::new();
+        let index_manager = IndexManager::new(name, ":memory:", 100)?;
+
+        Ok(Self {
+            name: name.to_string(),
+            table_dir: PathBuf::from(":memory:"),
+            data_file,
+            rat,
+            index_manager,
+            schema: None,
+            next_row_id: AtomicU64::new(1),
+            config,
+        })
+    }
+
     /// Set table schema
     pub fn set_schema(&mut self, schema: TableSchema) -> Result<()> {
-        let schema_path = self.table_dir.join("schema.json");
-        let content = serde_json::to_string_pretty(&schema)?;
-        std::fs::write(schema_path, content)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let schema_path = self.table_dir.join("schema.json");
+            let content = serde_json::to_string_pretty(&schema)?;
+            std::fs::write(schema_path, content)?;
+        }
         self.schema = Some(schema);
         Ok(())
     }
@@ -116,17 +140,25 @@ impl TableEngine {
     /// * `base_dir` - Base directory for database
     /// * `config` - Storage configuration
     pub fn create<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig) -> Result<Self> {
-        let base_dir = base_dir.as_ref();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let base_dir = base_dir.as_ref();
 
-        // Create table directory if it doesn't exist
-        let table_dir = base_dir.join(name);
-        if ! table_dir.exists() {
-            std::fs::create_dir_all(&table_dir)?;
-            // Also create indices directory
-            std::fs::create_dir_all(table_dir.join("indices"))?;
+            // Create table directory if it doesn't exist
+            let table_dir = base_dir.join(name);
+            if ! table_dir.exists() {
+                std::fs::create_dir_all(&table_dir)?;
+                // Also create indices directory
+                std::fs::create_dir_all(table_dir.join("indices"))?;
+            }
+
+            Self::open(name, base_dir, config)
         }
-
-        Self::open(name, base_dir, config)
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = base_dir;
+            Self::open_in_memory(name, config)
+        }
     }
 
     /// Insert a new row

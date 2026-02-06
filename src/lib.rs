@@ -38,6 +38,7 @@ use std::path::PathBuf;
 /// It coordinates storage, indexing, and query execution.
 pub struct Database {
     config: DatabaseConfig,
+    #[allow(dead_code)]
     data_dir: PathBuf,
     tables: HashMap<String, TableEngine>,
 }
@@ -98,7 +99,11 @@ impl Database {
     /// Get a table, loading it if necessary. Fails if table doesn't exist.
     pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
+            #[cfg(not(target_arch = "wasm32"))]
             let table = TableEngine::open(name, &self.data_dir, self.config.storage.clone())?;
+            #[cfg(target_arch = "wasm32")]
+            let table = TableEngine::open_in_memory(name, self.config.storage.clone())?;
+            
             self.tables.insert(name.to_string(), table);
         }
         Ok(self.tables.get_mut(name).unwrap())
@@ -107,7 +112,11 @@ impl Database {
     /// Create or get a table.
     pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
+            #[cfg(not(target_arch = "wasm32"))]
             let table = TableEngine::create(name, &self.data_dir, self.config.storage.clone())?;
+            #[cfg(target_arch = "wasm32")]
+            let table = TableEngine::open_in_memory(name, self.config.storage.clone())?;
+
             self.tables.insert(name.to_string(), table);
         }
         Ok(self.tables.get_mut(name).unwrap())
