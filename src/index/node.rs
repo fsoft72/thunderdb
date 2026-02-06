@@ -1,4 +1,3 @@
-use crate::storage::Value;
 use std::fmt::Debug;
 
 /// B-Tree node type
@@ -186,6 +185,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Value;
 
     #[test]
     fn test_node_creation() {
