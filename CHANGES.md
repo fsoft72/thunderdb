@@ -136,6 +136,59 @@ Features:
 
 All 94 tests passing (58 storage + 27 index) ✓
 
-## Phase 2 Progress: Steps 2.1-2.3 Complete ✓
+### Step 2.4: LIKE Operator Support
+- Pattern types: Exact, Prefix, Suffix, Contains, Complex
+- LikePattern parser for SQL LIKE patterns
+- Wildcard support: % (zero or more chars), _ (exactly one char)
+- Recursive pattern matching algorithm for complex patterns
+- Index optimization: prefix patterns can use B-Tree range scan
+- Range bounds calculation for efficient index queries
+- Non-string value handling
+- Comprehensive tests: 17 tests covering all pattern types
 
-Next: Step 2.4 - LIKE Operator Support
+Features:
+- Parse LIKE patterns (exact, prefix%, %suffix, %contains%, complex)
+- Match strings against patterns with % and _ wildcards
+- Index-aware: identifies patterns that can use B-Tree optimization
+- Range bounds for prefix patterns: "abc%" → range ["abc", "abd")
+- Complex pattern support with multiple wildcards
+- Edge case handling (empty patterns, %, %%, etc.)
+
+### Step 2.5: Index Statistics
+- IndexStatistics structure for query optimization
+- Metrics: cardinality, total entries, min/max values, avg duplicates
+- Compute statistics from B-Tree indices
+- Selectivity calculation (unique values / total entries)
+- Unique index detection
+- Statistics used for index selection in queries
+- Comprehensive tests: 5 tests for statistics computation
+
+Features:
+- Cardinality tracking (number of unique values)
+- Min/max value tracking for range optimization
+- Average duplicates for uniqueness assessment
+- Selectivity score for index quality (0.0 to 1.0)
+- Empty index handling
+- Support for all Value types
+
+All 116 tests passing (58 storage + 58 index) ✓
+
+## Phase 2 Status: COMPLETE ✓
+
+B-Tree Index implementation fully functional:
+- In-memory B-Tree with automatic splitting ✓
+- Binary persistence to .idx files ✓
+- LRU node caching ✓
+- Multi-index management per table ✓
+- LIKE operator pattern matching ✓
+- Index statistics for optimization ✓
+
+The index layer provides:
+- Fast O(log n) lookups
+- Efficient range queries
+- Pattern matching (LIKE support)
+- Multiple indices per table
+- Persistent storage
+- Query optimization statistics
+
+Next: Phase 3 - Direct Data Access API
