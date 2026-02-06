@@ -375,3 +375,65 @@ ThunderDB now supports:
 - Type-safe execution via Direct API
 
 Next: Phase 5 - REPL Interface
+
+---
+
+## 2026-02-06 - Phase 5: REPL Interface
+
+### Step 5.1: Basic REPL Loop
+- Interactive read-eval-print loop using rustyline
+- Multi-line input support (statements end with semicolon)
+- Command history with persistent storage (.thunderdb_history)
+- Readline features: line editing, history navigation (up/down arrows)
+- Error handling: Ctrl-C cancels input, Ctrl-D exits
+- Graceful handling of incomplete statements
+- SQL parsing and execution timing
+- Comprehensive tests: 1 test
+
+### Step 5.2: Special Commands
+- Command parser for dot-commands
+- Implemented commands:
+  - .help - Show help message with SQL syntax and tips
+  - .exit, .quit - Exit the REPL
+  - .tables - List all tables (stub)
+  - .schema [table] - Show table schema (stub)
+  - .stats [table] - Show table statistics (stub)
+- Case-insensitive command parsing
+- Optional arguments for .schema and .stats
+- Comprehensive tests: 6 tests
+
+### Step 5.3: Result Formatting
+- Tabular result formatting with borders
+- Automatic column width calculation
+- Column header display
+- Value truncation for long strings (max 50 chars)
+- Pretty number formatting (floats to 2 decimals)
+- NULL value display
+- Row count and execution time summary
+- Comprehensive tests: 8 tests
+
+Features:
+- Full readline support (via rustyline)
+- Multi-line statement editing
+- Command history with persistence
+- Special commands for metadata
+- Pretty-printed results
+- Execution timing
+- User-friendly error messages
+- Keyboard shortcuts (Ctrl-C, Ctrl-D)
+
+All 218 tests passing (203 previous + 15 new) ✓
+
+## Phase 5 Status: COMPLETE ✓
+
+REPL Interface fully functional:
+- Interactive SQL execution ✓
+- Multi-line input support ✓
+- Command history ✓
+- Special commands ✓
+- Result formatting ✓
+- Error handling ✓
+
+ThunderDB now has a complete user interface!
+
+Next: Phase 6 - Testing & Integration (Final Phase!)

@@ -1,15 +1,26 @@
 use thunderdb::{Database, Result};
 
-fn main() -> Result<()> {
-    println!("ThunderDB v{}", thunderdb::VERSION);
-    println!("Type .help for help, .exit to quit");
-    println!();
+#[cfg(feature = "repl")]
+use thunderdb::repl::Repl;
 
-    // For now, just open a database and show it works
+fn main() -> Result<()> {
+    // Open database
     let db = Database::open("./data")?;
-    println!("Database opened successfully at: {}", db.config().storage.data_dir);
-    println!();
-    println!("REPL not yet implemented - coming in Phase 5!");
+
+    #[cfg(feature = "repl")]
+    {
+        // Run REPL
+        let mut repl = Repl::new(db.config())?;
+        repl.run()?;
+    }
+
+    #[cfg(not(feature = "repl"))]
+    {
+        println!("ThunderDB v{}", thunderdb::VERSION);
+        println!("Database opened at: {}", db.config().storage.data_dir);
+        println!();
+        println!("REPL feature not enabled. Compile with --features repl to enable.");
+    }
 
     Ok(())
 }
