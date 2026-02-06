@@ -1,0 +1,20 @@
+// Storage layer - Phase 1
+//
+// This module implements the foundational storage system:
+// - Value: Enum for different data types with binary serialization
+// - Row: Structure representing a database row
+// - RecordAddressTable (RAT): In-memory index for fast row lookups
+// - DataFile: Append-only data.bin file management
+// - TableEngine: Coordinator for storage operations
+
+pub mod value;
+pub mod row;
+pub mod rat;
+pub mod data_file;
+pub mod table_engine;
+
+pub use value::Value;
+pub use row::Row;
+pub use rat::RecordAddressTable;
+pub use data_file::DataFile;
+pub use table_engine::TableEngine;

@@ -1,0 +1,23 @@
+{
+  "storage": {
+    "data_dir": "./data",
+    "fsync_on_write": false,
+    "fsync_interval_ms": 1000,
+    "max_data_file_size_mb": 1024
+  },
+  "index": {
+    "btree_order": 100,
+    "node_cache_size": 1000,
+    "lazy_update_threshold": 100,
+    "rebuild_threshold": 10000
+  },
+  "query": {
+    "default_limit": 1000,
+    "max_limit": 100000
+  },
+  "repl": {
+    "history_file": ".thunderdb_history",
+    "max_history_size": 1000,
+    "prompt": "thunderdb> "
+  }
+}
