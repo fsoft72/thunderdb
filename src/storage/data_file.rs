@@ -123,6 +123,66 @@ impl DataFile {
         Ok((offset, length))
     }
 
+    /// Append multiple rows in a single batch I/O operation
+    ///
+    /// Serializes all rows into the write buffer and writes them in one go,
+    /// with a single optional fsync at the end.
+    ///
+    /// # Arguments
+    /// * `rows` - Rows to append
+    ///
+    /// # Returns
+    /// Vector of (offset, length) tuples for each row
+    pub fn append_rows_batch(&mut self, rows: &[Row]) -> Result<Vec<(u64, u32)>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Serialize all rows into the write buffer
+        self.write_buffer.clear();
+        let mut positions = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            let row_start = self.write_buffer.len();
+
+            // Reserve space for marker + length prefix
+            self.write_buffer.push(ACTIVE_MARKER);
+            self.write_buffer.extend_from_slice(&[0u8; 4]); // placeholder length
+
+            // Serialize row data
+            let data_start = self.write_buffer.len();
+            row.write_to(&mut self.write_buffer)?;
+            let data_len = (self.write_buffer.len() - data_start) as u32;
+
+            // Patch the length prefix
+            self.write_buffer[row_start + 1..row_start + 5]
+                .copy_from_slice(&data_len.to_le_bytes());
+
+            let offset = self.current_offset + row_start as u64;
+            positions.push((offset, data_len));
+        }
+
+        // Single I/O write for the entire batch
+        let total_bytes = self.write_buffer.len() as u64;
+        match &mut self.backend {
+            DataFileBackend::File(file) => {
+                file.seek(SeekFrom::End(0))?;
+                file.write_all(&self.write_buffer)?;
+
+                if self.fsync_on_write {
+                    file.sync_all()?;
+                }
+            }
+            DataFileBackend::Memory(data) => {
+                data.extend_from_slice(&self.write_buffer);
+            }
+        }
+
+        self.current_offset += total_bytes;
+
+        Ok(positions)
+    }
+
     /// Read a row from the data file
     ///
     /// # Arguments

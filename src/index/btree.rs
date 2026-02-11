@@ -1,6 +1,5 @@
 use crate::error::{Error, Result};
 use crate::index::node::BTreeNode;
-use std::collections::HashMap;
 use std::fmt::Debug;
 
 /// B-Tree index structure
@@ -11,6 +10,7 @@ use std::fmt::Debug;
 /// - Range queries
 /// - Duplicate key handling
 ///
+/// Nodes are stored in a Vec-based arena for cache-friendly access.
 /// For ThunderDB: K = Value (column value), V = u64 (row_id)
 #[derive(Debug, Clone)]
 pub struct BTree<K, V>
@@ -24,14 +24,17 @@ where
     /// B-Tree order (maximum number of children per node)
     order: usize,
 
-    /// All nodes indexed by node_id
-    nodes: HashMap<u64, BTreeNode<K, V>>,
+    /// All nodes stored in a Vec arena (index = node_id)
+    nodes: Vec<BTreeNode<K, V>>,
 
     /// Next available node ID
     next_node_id: u64,
 
     /// First leaf node (for sequential scans)
     first_leaf_id: Option<u64>,
+
+    /// Number of key-value entries in the tree
+    entry_count: usize,
 }
 
 impl<K, V> BTree<K, V>
@@ -51,8 +54,8 @@ where
         let root_id = 0;
         let root = BTreeNode::new_leaf(root_id);
 
-        let mut nodes = HashMap::new();
-        nodes.insert(root_id, root);
+        let mut nodes = Vec::new();
+        nodes.push(root);
 
         Ok(Self {
             root_id,
@@ -60,6 +63,7 @@ where
             nodes,
             next_node_id: 1,
             first_leaf_id: Some(root_id),
+            entry_count: 0,
         })
     }
 
@@ -72,7 +76,7 @@ where
 
         // Try to insert into the leaf
         let should_split = {
-            let leaf = self.nodes.get_mut(&leaf_id).unwrap();
+            let leaf = &mut self.nodes[leaf_id as usize];
             if leaf.is_full(self.order) {
                 true
             } else {
@@ -85,6 +89,8 @@ where
             self.split_and_insert_leaf(leaf_id, key, value)?;
         }
 
+        self.entry_count += 1;
+
         Ok(())
     }
 
@@ -93,7 +99,7 @@ where
     /// Returns vector of values (supports duplicates)
     pub fn search(&self, key: &K) -> Vec<V> {
         let leaf_id = self.find_leaf(key);
-        let leaf = self.nodes.get(&leaf_id).unwrap();
+        let leaf = &self.nodes[leaf_id as usize];
 
         let mut results = Vec::new();
 
@@ -137,7 +143,7 @@ where
         let mut current_leaf_id = self.find_leaf(start_key);
 
         loop {
-            let leaf = match self.nodes.get(&current_leaf_id) {
+            let leaf = match self.nodes.get(current_leaf_id as usize) {
                 Some(node) => node,
                 None => break,
             };
@@ -173,7 +179,7 @@ where
         let mut current_leaf_id = self.find_leaf(start_key);
 
         loop {
-            let leaf = match self.nodes.get(&current_leaf_id) {
+            let leaf = match self.nodes.get(current_leaf_id as usize) {
                 Some(node) => node,
                 None => break,
             };
@@ -202,7 +208,7 @@ where
         };
 
         loop {
-            let leaf = match self.nodes.get(&current_id) {
+            let leaf = match self.nodes.get(current_id as usize) {
                 Some(node) => node,
                 None => break,
             };
@@ -232,7 +238,7 @@ where
             let mut current_id = first_id;
 
             loop {
-                let leaf = match self.nodes.get(&current_id) {
+                let leaf = match self.nodes.get(current_id as usize) {
                     Some(node) => node,
                     None => break,
                 };
@@ -251,14 +257,14 @@ where
         results
     }
 
-    /// Get the number of entries in the tree
+    /// Get the number of entries in the tree — O(1)
     pub fn len(&self) -> usize {
-        self.scan_all().len()
+        self.entry_count
     }
 
-    /// Check if tree is empty
+    /// Check if tree is empty — O(1)
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.entry_count == 0
     }
 
     /// Find the leaf node where a key should be located
@@ -266,24 +272,15 @@ where
         let mut current_id = self.root_id;
 
         loop {
-            let node = self.nodes.get(&current_id).unwrap();
+            let node = &self.nodes[current_id as usize];
 
             if node.is_leaf() {
                 return current_id;
             }
 
             // Internal node - find which child to follow
-            // For internal nodes: if key < keys[i], we go to children[i]
-            // if key >= keys[i], we continue to next key
             let pos = node.find_position(key);
-            
-            // If find_position returns an index where key is EQUAL or LESS, 
-            // that's the child index we want, EXCEPT if it's an exact match
-            // where we want to go to the right child in some B-Tree variants.
-            // But here, find_position gives us the first index where keys[idx] >= key.
-            // If keys[idx] > key, child_idx is idx.
-            // If keys[idx] == key, child_idx is idx + 1 (to handle duplicates/range).
-            
+
             let mut child_idx = pos;
             if pos < node.keys.len() && node.keys[pos].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal {
                 child_idx = pos + 1;
@@ -300,11 +297,12 @@ where
 
         // Split the leaf
         let (middle_key, right_node) = {
-            let leaf = self.nodes.get_mut(&leaf_id).unwrap();
+            let leaf = &mut self.nodes[leaf_id as usize];
             leaf.split_leaf(new_node_id)
         };
 
-        self.nodes.insert(new_node_id, right_node);
+        debug_assert_eq!(new_node_id as usize, self.nodes.len());
+        self.nodes.push(right_node);
 
         // Insert the new key-value pair into appropriate node
         {
@@ -313,12 +311,12 @@ where
                 _ => new_node_id,
             };
 
-            let target = self.nodes.get_mut(&target_id).unwrap();
+            let target = &mut self.nodes[target_id as usize];
             target.insert_leaf(key, value, self.order);
         }
 
         // Propagate middle key up to parent
-        let parent_id = self.nodes.get(&leaf_id).unwrap().parent;
+        let parent_id = self.nodes[leaf_id as usize].parent;
         match parent_id {
             Some(parent) => self.insert_into_parent(parent, middle_key, new_node_id)?,
             None => self.create_new_root(leaf_id, middle_key, new_node_id)?,
@@ -330,12 +328,12 @@ where
     /// Insert a key into a parent internal node
     fn insert_into_parent(&mut self, parent_id: u64, key: K, right_child_id: u64) -> Result<()> {
         let should_split = {
-            let parent = self.nodes.get_mut(&parent_id).unwrap();
+            let parent = &mut self.nodes[parent_id as usize];
             if parent.is_full(self.order) {
                 true
             } else {
                 parent.insert_internal(key.clone(), right_child_id, self.order);
-                self.nodes.get_mut(&right_child_id).unwrap().parent = Some(parent_id);
+                self.nodes[right_child_id as usize].parent = Some(parent_id);
                 false
             }
         };
@@ -354,18 +352,17 @@ where
 
         // Split the internal node
         let (middle_key, right_node) = {
-            let node = self.nodes.get_mut(&node_id).unwrap();
+            let node = &mut self.nodes[node_id as usize];
             node.split_internal(new_node_id)
         };
 
         // Update parent pointers for children of right node
-        for child_id in &right_node.children {
-            if let Some(child) = self.nodes.get_mut(child_id) {
-                child.parent = Some(new_node_id);
-            }
+        for child_id in &right_node.children.clone() {
+            self.nodes[*child_id as usize].parent = Some(new_node_id);
         }
 
-        self.nodes.insert(new_node_id, right_node);
+        debug_assert_eq!(new_node_id as usize, self.nodes.len());
+        self.nodes.push(right_node);
 
         // Insert the new key into appropriate node
         {
@@ -374,13 +371,13 @@ where
                 _ => new_node_id,
             };
 
-            let target = self.nodes.get_mut(&target_id).unwrap();
+            let target = &mut self.nodes[target_id as usize];
             target.insert_internal(key, right_child_id, self.order);
-            self.nodes.get_mut(&right_child_id).unwrap().parent = Some(target_id);
+            self.nodes[right_child_id as usize].parent = Some(target_id);
         }
 
         // Propagate middle key up to parent
-        let grandparent_id = self.nodes.get(&node_id).unwrap().parent;
+        let grandparent_id = self.nodes[node_id as usize].parent;
         match grandparent_id {
             Some(gp) => self.insert_into_parent(gp, middle_key, new_node_id)?,
             None => self.create_new_root(node_id, middle_key, new_node_id)?,
@@ -400,10 +397,11 @@ where
         new_root.children.push(right_id);
 
         // Update parent pointers
-        self.nodes.get_mut(&left_id).unwrap().parent = Some(new_root_id);
-        self.nodes.get_mut(&right_id).unwrap().parent = Some(new_root_id);
+        self.nodes[left_id as usize].parent = Some(new_root_id);
+        self.nodes[right_id as usize].parent = Some(new_root_id);
 
-        self.nodes.insert(new_root_id, new_root);
+        debug_assert_eq!(new_root_id as usize, self.nodes.len());
+        self.nodes.push(new_root);
         self.root_id = new_root_id;
 
         Ok(())
@@ -415,7 +413,7 @@ where
         let mut internal_count = 0;
         let mut total_keys = 0;
 
-        for node in self.nodes.values() {
+        for node in self.nodes.iter() {
             if node.is_leaf() {
                 leaf_count += 1;
                 total_keys += node.key_count();
@@ -440,7 +438,7 @@ where
         let mut current_id = self.root_id;
 
         loop {
-            let node = self.nodes.get(&current_id).unwrap();
+            let node = &self.nodes[current_id as usize];
             height += 1;
 
             if node.is_leaf() {
@@ -624,5 +622,16 @@ mod tests {
         let results = tree.scan_to(&35);
         assert_eq!(results.len(), 3);
         assert_eq!(results[2].0, 30);
+    }
+
+    #[test]
+    fn test_btree_len_is_o1() {
+        let mut tree = BTree::new(5).unwrap();
+        assert_eq!(tree.len(), 0);
+
+        for i in 0..100 {
+            tree.insert(i, i as u64).unwrap();
+            assert_eq!(tree.len(), (i + 1) as usize);
+        }
     }
 }

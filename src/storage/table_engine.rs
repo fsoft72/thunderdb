@@ -250,17 +250,52 @@ impl TableEngine {
 
     /// Insert multiple rows in batch
     ///
+    /// Optimized for throughput: single I/O write, bulk RAT update,
+    /// column mapping computed once, and batched index updates.
+    ///
     /// # Arguments
     /// * `rows` - Vector of value vectors to insert
     ///
     /// # Returns
     /// Vector of auto-generated row_ids
     pub fn insert_batch(&mut self, rows: Vec<Vec<Value>>) -> Result<Vec<u64>> {
-        let mut row_ids = Vec::with_capacity(rows.len());
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        for values in rows {
-            let row_id = self.insert_row(values)?;
-            row_ids.push(row_id);
+        // 1. Generate all row IDs upfront
+        let start_id = self.next_row_id.fetch_add(rows.len() as u64, Ordering::SeqCst);
+        let row_ids: Vec<u64> = (start_id..start_id + rows.len() as u64).collect();
+
+        // 2. Create all Row objects
+        let row_objects: Vec<Row> = row_ids
+            .iter()
+            .zip(rows.into_iter())
+            .map(|(&row_id, values)| Row::new(row_id, values))
+            .collect();
+
+        // 3. Batch data file write — single I/O
+        let positions = self.data_file.append_rows_batch(&row_objects)?;
+
+        // 4. Bulk RAT update
+        let rat_entries: Vec<(u64, u64, u32)> = row_ids
+            .iter()
+            .zip(positions.iter())
+            .map(|(&row_id, &(offset, length))| (row_id, offset, length))
+            .collect();
+        self.rat.bulk_insert(rat_entries)?;
+
+        // 5. Batch index updates (column mapping computed once)
+        if ! self.index_manager.indexed_columns().is_empty() {
+            let mut mapping = std::collections::HashMap::new();
+            if let Some(schema) = &self.schema {
+                for (i, col) in schema.columns.iter().enumerate() {
+                    mapping.insert(col.name.clone(), i);
+                }
+            }
+            for row in &row_objects {
+                self.index_manager.insert_row(row, &mapping)?;
+            }
         }
 
         Ok(row_ids)

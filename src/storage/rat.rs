@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -60,10 +61,10 @@ impl RatEntry {
 /// Record Address Table (RAT)
 ///
 /// In-memory index mapping row_id to physical location in data file.
-/// Maintained as a sorted vector for O(log n) binary search.
+/// Uses BTreeMap for O(log n) insertion (vs O(n) for sorted Vec).
 pub struct RecordAddressTable {
-    /// Entries sorted by row_id
-    entries: Vec<RatEntry>,
+    /// Entries keyed by row_id (BTreeMap maintains sorted order)
+    entries: BTreeMap<u64, RatEntry>,
     /// Whether the RAT has been modified since last save
     dirty: bool,
 }
@@ -76,7 +77,7 @@ impl RecordAddressTable {
     /// Create a new empty RAT
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: BTreeMap::new(),
             dirty: false,
         }
     }
@@ -119,11 +120,12 @@ impl RecordAddressTable {
         let count = u64::from_le_bytes(count_buf) as usize;
 
         // Read entries
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = BTreeMap::new();
         for _ in 0..count {
             let mut entry_bytes = [0u8; RatEntry::SIZE];
             file.read_exact(&mut entry_bytes)?;
-            entries.push(RatEntry::from_bytes(&entry_bytes));
+            let entry = RatEntry::from_bytes(&entry_bytes);
+            entries.insert(entry.row_id, entry);
         }
 
         Ok(Self {
@@ -146,8 +148,8 @@ impl RecordAddressTable {
         file.write_all(&RAT_VERSION.to_le_bytes())?;
         file.write_all(&(self.entries.len() as u64).to_le_bytes())?;
 
-        // Write entries
-        for entry in &self.entries {
+        // Write entries (BTreeMap iterates in sorted key order)
+        for entry in self.entries.values() {
             file.write_all(&entry.to_bytes())?;
         }
 
@@ -167,37 +169,46 @@ impl RecordAddressTable {
     /// # Returns
     /// Error if row_id already exists and is active
     pub fn insert(&mut self, row_id: u64, offset: u64, length: u32) -> Result<()> {
-        // Binary search to find insertion point
-        match self.entries.binary_search_by_key(&row_id, |e| e.row_id) {
-            Ok(pos) => {
-                // If it's already there, it must be deleted to be overwritten
-                if self.entries[pos].deleted {
-                    self.entries[pos] = RatEntry {
-                        row_id,
-                        offset,
-                        length,
-                        deleted: false,
-                    };
-                    self.dirty = true;
-                    Ok(())
-                } else {
-                    Err(Error::Storage(format!("Row ID {} already exists and is active", row_id)))
-                }
-            }
-            Err(pos) => {
-                self.entries.insert(
-                    pos,
-                    RatEntry {
-                        row_id,
-                        offset,
-                        length,
-                        deleted: false,
-                    },
-                );
+        if let Some(existing) = self.entries.get(&row_id) {
+            if existing.deleted {
+                self.entries.insert(row_id, RatEntry {
+                    row_id,
+                    offset,
+                    length,
+                    deleted: false,
+                });
                 self.dirty = true;
                 Ok(())
+            } else {
+                Err(Error::Storage(format!("Row ID {} already exists and is active", row_id)))
             }
+        } else {
+            self.entries.insert(row_id, RatEntry {
+                row_id,
+                offset,
+                length,
+                deleted: false,
+            });
+            self.dirty = true;
+            Ok(())
         }
+    }
+
+    /// Bulk insert multiple entries into the RAT
+    ///
+    /// # Arguments
+    /// * `batch` - Vector of (row_id, offset, length) tuples
+    pub fn bulk_insert(&mut self, batch: Vec<(u64, u64, u32)>) -> Result<()> {
+        for (row_id, offset, length) in batch {
+            self.entries.insert(row_id, RatEntry {
+                row_id,
+                offset,
+                length,
+                deleted: false,
+            });
+        }
+        self.dirty = true;
+        Ok(())
     }
 
     /// Look up a row by ID
@@ -208,17 +219,13 @@ impl RecordAddressTable {
     /// # Returns
     /// Some((offset, length)) if found and not deleted, None otherwise
     pub fn get(&self, row_id: u64) -> Option<(u64, u32)> {
-        self.entries
-            .binary_search_by_key(&row_id, |e| e.row_id)
-            .ok()
-            .and_then(|idx| {
-                let entry = &self.entries[idx];
-                if entry.deleted {
-                    None
-                } else {
-                    Some((entry.offset, entry.length))
-                }
-            })
+        self.entries.get(&row_id).and_then(|entry| {
+            if entry.deleted {
+                None
+            } else {
+                Some((entry.offset, entry.length))
+            }
+        })
     }
 
     /// Mark a row as deleted (tombstone)
@@ -229,9 +236,9 @@ impl RecordAddressTable {
     /// # Returns
     /// true if row was found and marked deleted, false otherwise
     pub fn delete(&mut self, row_id: u64) -> bool {
-        if let Ok(idx) = self.entries.binary_search_by_key(&row_id, |e| e.row_id) {
-            if ! self.entries[idx].deleted {
-                self.entries[idx].deleted = true;
+        if let Some(entry) = self.entries.get_mut(&row_id) {
+            if ! entry.deleted {
+                entry.deleted = true;
                 self.dirty = true;
                 return true;
             }
@@ -251,7 +258,7 @@ impl RecordAddressTable {
 
     /// Get the number of active (non-deleted) entries
     pub fn active_count(&self) -> usize {
-        self.entries.iter().filter(|e| !e.deleted).count()
+        self.entries.values().filter(|e| !e.deleted).count()
     }
 
     /// Check if RAT has been modified
@@ -261,13 +268,13 @@ impl RecordAddressTable {
 
     /// Get all row IDs (including deleted)
     pub fn row_ids(&self) -> Vec<u64> {
-        self.entries.iter().map(|e| e.row_id).collect()
+        self.entries.keys().cloned().collect()
     }
 
     /// Get all active row IDs (excluding deleted)
     pub fn active_row_ids(&self) -> Vec<u64> {
         self.entries
-            .iter()
+            .values()
             .filter(|e| !e.deleted)
             .map(|e| e.row_id)
             .collect()
@@ -278,7 +285,7 @@ impl RecordAddressTable {
     /// This should be called periodically to reclaim memory
     pub fn compact(&mut self) {
         let old_len = self.entries.len();
-        self.entries.retain(|e| !e.deleted);
+        self.entries.retain(|_, e| !e.deleted);
         if self.entries.len() != old_len {
             self.dirty = true;
         }
@@ -486,5 +493,23 @@ mod tests {
         let result = RecordAddressTable::load("/tmp/nonexistent_rat.bin");
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_rat_bulk_insert() {
+        let mut rat = RecordAddressTable::new();
+
+        let batch = vec![
+            (1, 0, 100),
+            (2, 100, 200),
+            (3, 300, 150),
+        ];
+
+        rat.bulk_insert(batch).unwrap();
+
+        assert_eq!(rat.len(), 3);
+        assert_eq!(rat.get(1), Some((0, 100)));
+        assert_eq!(rat.get(2), Some((100, 200)));
+        assert_eq!(rat.get(3), Some((300, 150)));
     }
 }

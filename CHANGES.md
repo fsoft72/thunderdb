@@ -437,3 +437,34 @@ REPL Interface fully functional:
 ThunderDB now has a complete user interface!
 
 Next: Phase 6 - Testing & Integration (Final Phase!)
+
+---
+
+## 2026-02-11 - P0 Performance Optimizations
+
+### Change 1: RAT — Replace Vec<RatEntry> with BTreeMap
+- Replaced `entries: Vec<RatEntry>` with `entries: BTreeMap<u64, RatEntry>`
+- Insert is now O(log n) instead of O(n) — eliminates Vec::insert shifting
+- Get, delete remain O(log n) via BTreeMap lookups
+- Serialization format unchanged (BTreeMap iterates in sorted key order)
+- Added `bulk_insert()` method for batch operations
+- All existing tests pass unchanged
+
+### Change 2: BTree nodes — Replace HashMap with Vec arena
+- Replaced `nodes: HashMap<u64, BTreeNode>` with `nodes: Vec<BTreeNode>`
+- Node IDs are sequential indices into the Vec — cache-friendly access
+- All node lookups are now O(1) array indexing instead of hash + pointer chase
+- Added `entry_count: usize` field — `len()` and `is_empty()` are now O(1)
+  (previously `len()` called `scan_all().len()` which was O(n))
+- Debug assertions verify sequential node ID allocation
+
+### Change 3: True batch insert in TableEngine
+- Added `append_rows_batch()` to DataFile — single I/O write for multiple rows
+- Rewrote `insert_batch()` in TableEngine:
+  - Row IDs generated in bulk via single `fetch_add`
+  - All rows serialized into one write buffer, single I/O write
+  - Bulk RAT insert via `bulk_insert()`
+  - Column mapping computed once (not per-row)
+  - Index updates share the single mapping
+
+All 221 tests passing ✓
