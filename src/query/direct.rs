@@ -3,8 +3,10 @@
 // Type-safe data access operations
 
 use crate::error::Result;
+use crate::index::stats::IndexStatistics;
 use crate::query::{Filter, Operator};
 use crate::storage::{Row, Value};
+use std::collections::HashMap;
 
 /// Direct data access trait for type-safe CRUD operations
 ///
@@ -180,51 +182,87 @@ pub fn apply_filters(
 
 /// Helper function to choose the best index for a query
 ///
+/// When stats are available, estimates result set sizes and picks the most
+/// selective index. Without stats, falls back to operator-priority heuristics
+/// (Equals first, then ranges/LIKE).
+///
 /// # Arguments
 /// * `filters` - List of filters
 /// * `available_indices` - List of indexed column names
+/// * `stats` - Optional per-column index statistics for cost estimation
 ///
 /// # Returns
 /// Best column to use for index lookup, if any
-pub fn choose_index(filters: &[Filter], available_indices: &[String]) -> Option<(String, Operator)> {
+pub fn choose_index(
+    filters: &[Filter],
+    available_indices: &[String],
+    stats: Option<&HashMap<String, IndexStatistics>>,
+) -> Option<(String, Operator)> {
+    // Collect all indexable candidates
+    let mut candidates: Vec<(String, Operator, bool)> = Vec::new();
+
+    for filter in filters {
+        if !available_indices.contains(&filter.column) {
+            continue;
+        }
+        let indexable = match &filter.operator {
+            Operator::Equals(_)
+            | Operator::GreaterThan(_)
+            | Operator::GreaterThanOrEqual(_)
+            | Operator::LessThan(_)
+            | Operator::LessThanOrEqual(_)
+            | Operator::Between(_, _) => true,
+            Operator::Like(pattern) => {
+                use crate::index::LikePattern;
+                if let Ok(lp) = LikePattern::parse(pattern) {
+                    lp.can_use_index()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if indexable {
+            candidates.push((filter.column.clone(), filter.operator.clone(), matches!(filter.operator, Operator::Equals(_))));
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // If stats are available, pick the candidate with the smallest estimated result set
+    if let Some(stats_map) = stats {
+        let mut best: Option<(String, Operator, usize)> = None;
+        for (col, op, _) in &candidates {
+            let estimate = if let Some(col_stats) = stats_map.get(col) {
+                col_stats.estimate_rows(op)
+            } else {
+                usize::MAX
+            };
+            if best.as_ref().map_or(true, |b| estimate < b.2) {
+                best = Some((col.clone(), op.clone(), estimate));
+            }
+        }
+        return best.map(|(col, op, _)| (col, op));
+    }
+
+    // Fallback: operator-priority heuristics (no stats)
     // Priority 1: Equals
-    for filter in filters {
-        if available_indices.contains(&filter.column) {
-            if matches!(filter.operator, Operator::Equals(_)) {
-                return Some((filter.column.clone(), filter.operator.clone()));
-            }
+    for (col, op, is_eq) in &candidates {
+        if *is_eq {
+            return Some((col.clone(), op.clone()));
         }
     }
 
-    // Priority 2: Range operators and Prefix LIKE
-    for filter in filters {
-        if available_indices.contains(&filter.column) {
-            match &filter.operator {
-                Operator::GreaterThan(_) | Operator::GreaterThanOrEqual(_) |
-                Operator::LessThan(_) | Operator::LessThanOrEqual(_) |
-                Operator::Between(_, _) => {
-                    return Some((filter.column.clone(), filter.operator.clone()));
-                }
-                Operator::Like(pattern) => {
-                    use crate::index::LikePattern;
-                    if let Ok(lp) = LikePattern::parse(pattern) {
-                        if lp.can_use_index() {
-                            return Some((filter.column.clone(), filter.operator.clone()));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    None
+    // Priority 2: anything else that's indexable
+    let (col, op, _) = candidates.into_iter().next().unwrap();
+    Some((col, op))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn create_test_row(row_id: u64, id: i32, name: &str, age: i32) -> Row {
         Row::new(
@@ -307,7 +345,7 @@ mod tests {
 
         let indices = vec!["id".to_string(), "age".to_string()];
 
-        let result = choose_index(&filters, &indices);
+        let result = choose_index(&filters, &indices, None);
         assert!(result.is_some());
 
         let (column, _) = result.unwrap();
@@ -323,7 +361,7 @@ mod tests {
 
         let indices = vec!["age".to_string()];
 
-        let result = choose_index(&filters, &indices);
+        let result = choose_index(&filters, &indices, None);
         assert!(result.is_some());
 
         let (column, _) = result.unwrap();
@@ -336,8 +374,41 @@ mod tests {
 
         let indices = vec!["id".to_string()];
 
-        let result = choose_index(&filters, &indices);
+        let result = choose_index(&filters, &indices, None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_choose_index_with_stats() {
+        let filters = vec![
+            Filter::new("age", Operator::Equals(Value::Int32(25))),
+            Filter::new("city", Operator::Equals(Value::Varchar("Rome".to_string()))),
+        ];
+
+        let indices = vec!["age".to_string(), "city".to_string()];
+
+        // city has higher cardinality (more selective for Equals)
+        let mut stats_map = HashMap::new();
+        stats_map.insert("age".to_string(), IndexStatistics {
+            cardinality: 10,
+            total_entries: 1000,
+            min_value: Some(Value::Int32(1)),
+            max_value: Some(Value::Int32(100)),
+            avg_duplicates: 100.0,
+        });
+        stats_map.insert("city".to_string(), IndexStatistics {
+            cardinality: 500,
+            total_entries: 1000,
+            min_value: None,
+            max_value: None,
+            avg_duplicates: 2.0,
+        });
+
+        let result = choose_index(&filters, &indices, Some(&stats_map));
+        assert!(result.is_some());
+        let (column, _) = result.unwrap();
+        // city is more selective: 1000/500=2 vs age 1000/10=100
+        assert_eq!(column, "city");
     }
 
     #[test]

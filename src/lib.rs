@@ -306,7 +306,9 @@ impl DirectDataAccess for Database {
 
         // Try to use an index
         let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
-        let source_rows = if let Some((col, op)) = choose_index(&filters, &indexed_columns) {
+        let all_stats = table_engine.index_manager().all_stats();
+        let stats_ref = if all_stats.is_empty() { None } else { Some(all_stats) };
+        let source_rows = if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
             match op {
                 Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
                 Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,

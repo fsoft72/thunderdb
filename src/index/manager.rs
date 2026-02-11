@@ -4,6 +4,7 @@
 
 use crate::error::{Error, Result};
 use crate::index::BTree;
+use crate::index::stats::IndexStatistics;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::index::{load_index, save_index};
 use crate::storage::{Row, Value};
@@ -29,6 +30,9 @@ pub struct IndexManager {
 
     /// B-Tree order for new indices
     btree_order: usize,
+
+    /// Cached statistics per indexed column
+    stats_cache: HashMap<String, IndexStatistics>,
 }
 
 impl IndexManager {
@@ -55,6 +59,7 @@ impl IndexManager {
             indices: HashMap::new(),
             indexed_columns: Vec::new(),
             btree_order,
+            stats_cache: HashMap::new(),
         })
     }
 
@@ -73,6 +78,7 @@ impl IndexManager {
         let tree = BTree::new(self.btree_order)?;
         self.indices.insert(column_name.to_string(), tree);
         self.indexed_columns.push(column_name.to_string());
+        self.stats_cache.insert(column_name.to_string(), IndexStatistics::empty());
 
         Ok(())
     }
@@ -91,6 +97,7 @@ impl IndexManager {
 
         self.indices.remove(column_name);
         self.indexed_columns.retain(|col| col != column_name);
+        self.stats_cache.remove(column_name);
 
         // Remove index file
         #[cfg(not(target_arch = "wasm32"))]
@@ -115,6 +122,9 @@ impl IndexManager {
                 if let Some(value) = row.values.get(col_idx) {
                     if let Some(index) = self.indices.get_mut(column_name) {
                         index.insert(value.clone(), row.row_id)?;
+                    }
+                    if let Some(stats) = self.stats_cache.get_mut(column_name) {
+                        stats.record_insert(value);
                     }
                 }
             }
@@ -143,6 +153,9 @@ impl IndexManager {
                 if let Some(value) = values.get(col_idx) {
                     if let Some(index) = self.indices.get_mut(column_name) {
                         index.delete(value, &row_id);
+                    }
+                    if let Some(stats) = self.stats_cache.get_mut(column_name) {
+                        stats.record_delete();
                     }
                 }
             }
@@ -303,7 +316,9 @@ impl IndexManager {
 
                         if ! self.indices.contains_key(&column_name) {
                             let index = load_index(&path)?;
+                            let stats = IndexStatistics::from_btree(&index);
                             self.indices.insert(column_name.clone(), index);
+                            self.stats_cache.insert(column_name.clone(), stats);
                             if ! self.indexed_columns.contains(&column_name) {
                                 self.indexed_columns.push(column_name);
                             }
@@ -342,10 +357,24 @@ impl IndexManager {
             }
         }
 
+        // Recompute stats from rebuilt index
+        let stats = IndexStatistics::from_btree(&index);
+
         // Replace old index
         self.indices.insert(column_name.to_string(), index);
+        self.stats_cache.insert(column_name.to_string(), stats);
 
         Ok(())
+    }
+
+    /// Get cached statistics for a specific column's index
+    pub fn column_stats(&self, col: &str) -> Option<&IndexStatistics> {
+        self.stats_cache.get(col)
+    }
+
+    /// Get all cached index statistics
+    pub fn all_stats(&self) -> &HashMap<String, IndexStatistics> {
+        &self.stats_cache
     }
 
     /// Get index statistics
