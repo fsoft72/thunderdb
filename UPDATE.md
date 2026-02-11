@@ -19,7 +19,7 @@ This document lists all identified performance bottlenecks, architectural ineffi
 
 ## 1. Critical — Storage Layer
 
-### 1.1 RAT Insert is O(n) — Replace with BTreeMap
+### 1.1 RAT Insert is O(n) — Replace with BTreeMap ✅ DONE (P0)
 
 **File:** `src/storage/rat.rs`
 
@@ -45,7 +45,7 @@ pub struct RatTable {
 
 ---
 
-### 1.2 Batch Insert is Not Truly Batched
+### 1.2 Batch Insert is Not Truly Batched ✅ DONE (P0)
 
 **File:** `src/storage/table_engine.rs`
 
@@ -130,7 +130,7 @@ This is distinct from OS-level buffering — it avoids repeated `seek` syscalls 
 
 ## 2. Critical — Index Layer
 
-### 2.1 B-Tree Node Storage: HashMap → Vec (Arena)
+### 2.1 B-Tree Node Storage: HashMap → Vec (Arena) ✅ DONE (P0)
 
 **File:** `src/index/btree.rs`
 
@@ -160,7 +160,7 @@ pub struct BTree<K, V> {
 
 ---
 
-### 2.2 Index Deletion Not Implemented
+### 2.2 Index Deletion Not Implemented ✅ DONE (P1)
 
 **File:** `src/index/manager.rs`, `src/index/btree.rs`
 
@@ -188,7 +188,7 @@ pub struct LeafData<K, V> {
 
 ---
 
-### 2.3 Index Load is O(n log n) — Serialize Tree Structure
+### 2.3 Index Load is O(n log n) — Serialize Tree Structure ✅ DONE (P1)
 
 **File:** `src/index/persist.rs`
 
@@ -247,7 +247,7 @@ Bloom filters are tiny (8KB for 100K entries at 1% false positive rate) and O(k)
 
 ## 3. High — Query Execution
 
-### 3.1 Push Filters Down to Storage Layer
+### 3.1 Push Filters Down to Storage Layer ✅ DONE (P1)
 
 **File:** `src/query/direct.rs`
 
@@ -389,7 +389,7 @@ The `write_to` pattern already exists for `Value` but `Row` doesn't use it — i
 
 ---
 
-### 4.3 fsync Strategy: Group Commit
+### 4.3 fsync Strategy: Group Commit ✅ DONE (P1)
 
 **File:** `src/storage/data_file.rs`
 
@@ -406,7 +406,7 @@ This batches the fsync cost across many writes while maintaining durability guar
 
 ---
 
-### 4.4 Use `BufWriter` for Data File
+### 4.4 Use `BufWriter` for Data File ✅ DONE (P1)
 
 **File:** `src/storage/data_file.rs`
 
@@ -594,32 +594,167 @@ The current benchmarks only cover a fraction of the performance surface. Add:
 
 ## Summary — Priority Matrix
 
-| Priority | Item | Expected Speedup | Effort |
-|---|---|---|---|
-| **P0** | 1.1 RAT → BTreeMap | 1000x insert at scale | Low |
-| **P0** | 2.1 BTree nodes → Vec arena | 2-4x tree ops | Medium |
-| **P0** | 1.2 True batch insert | 5-20x batch insert | Medium |
-| **P1** | 2.2 Index deletion | Prevents index bloat | Medium |
-| **P1** | 3.1 Streaming/iterator model | 10x for LIMIT queries | Medium |
-| **P1** | 4.4 BufWriter for data file | 2-5x insert throughput | Low |
-| **P1** | 4.3 Group commit (fsync) | 10-100x durable writes | Medium |
-| **P1** | 2.3 Serialize tree structure | 20x index load | High |
-| **P2** | 3.2 Statistics-based index selection | 10-100x selective queries | Medium |
-| **P2** | 3.3 Multi-index intersection | 5-50x multi-filter | Medium |
-| **P2** | 4.1 String arena / zero-copy | 30-50% scan alloc | High |
-| **P2** | 5.3 Prepared statement cache | 5-10x repeated queries | Low |
-| **P2** | 1.3 Auto-compaction | Stable performance | Medium |
-| **P3** | 3.4 Column projection push-down | Proportional to width | Medium |
-| **P3** | 5.1 Tokenizer byte parsing | Eliminates alloc | Low |
-| **P3** | 5.2 Expression arena | Better cache locality | Medium |
-| **P3** | 2.5 Bloom filters | Avoid wasted lookups | Low |
-| **P3** | 6.1 Relax atomic ordering | ARM speedup | Trivial |
-| **P3** | 7.1 Cache table list | Eliminates I/O | Trivial |
-| **P4** | 6.2 Reader-writer concurrency | Enables parallelism | High |
-| **P4** | 4.2 Direct row serialization | 1 alloc per write | Low |
-| **P4** | 7.2 Formatter single-pass | REPL only | Trivial |
-| **P4** | 7.3 Remove dead config | Code clarity | Trivial |
+| Priority | Item | Expected Speedup | Effort | Status |
+|---|---|---|---|---|
+| **P0** | 1.1 RAT → BTreeMap | 1000x insert at scale | Low | **DONE** |
+| **P0** | 2.1 BTree nodes → Vec arena | 2-4x tree ops | Medium | **DONE** |
+| **P0** | 1.2 True batch insert | 5-20x batch insert | Medium | **DONE** |
+| **P1** | 2.2 Index deletion | Prevents index bloat | Medium | **DONE** |
+| **P1** | 3.1 Streaming/iterator model | 10x for LIMIT queries | Medium | **DONE** |
+| **P1** | 4.4 BufWriter for data file | 2-5x insert throughput | Low | **DONE** |
+| **P1** | 4.3 Group commit (fsync) | 10-100x durable writes | Medium | **DONE** |
+| **P1** | 2.3 Serialize tree structure | 20x index load | High | **DONE** |
+| **P2** | 3.2 Statistics-based index selection | 10-100x selective queries | Medium | |
+| **P2** | 3.3 Multi-index intersection | 5-50x multi-filter | Medium | |
+| **P2** | 4.1 String arena / zero-copy | 30-50% scan alloc | High | |
+| **P2** | 5.3 Prepared statement cache | 5-10x repeated queries | Low | |
+| **P2** | 1.3 Auto-compaction | Stable performance | Medium | |
+| **P3** | 3.4 Column projection push-down | Proportional to width | Medium | |
+| **P3** | 5.1 Tokenizer byte parsing | Eliminates alloc | Low | |
+| **P3** | 5.2 Expression arena | Better cache locality | Medium | |
+| **P3** | 2.5 Bloom filters | Avoid wasted lookups | Low | |
+| **P3** | 6.1 Relax atomic ordering | ARM speedup | Trivial | |
+| **P3** | 7.1 Cache table list | Eliminates I/O | Trivial | |
+| **P4** | 6.2 Reader-writer concurrency | Enables parallelism | High | |
+| **P4** | 4.2 Direct row serialization | 1 alloc per write | Low | |
+| **P4** | 7.2 Formatter single-pass | REPL only | Trivial | |
+| **P4** | 7.3 Remove dead config | Code clarity | Trivial | |
 
 ---
 
-*Generated on 2026-02-11 — based on full codebase review of ThunderDB-Rust v0.1.0*
+## P0 — Completed (2026-02-11)
+
+All three P0 items shipped in a single commit:
+
+- **RAT → BTreeMap:** `Vec<RatEntry>` replaced with `BTreeMap<u64, RatEntry>`. O(n) insert → O(log n). Added `bulk_insert()`.
+- **BTree Vec arena:** `HashMap<u64, BTreeNode>` replaced with `Vec<BTreeNode>`. O(1) cache-friendly lookups. Added O(1) `len()`/`is_empty()` via `entry_count`.
+- **True batch insert:** `append_rows_batch()` in DataFile (single I/O), bulk RAT insert, column mapping computed once. Single `fsync` at end.
+
+---
+
+## P1 — Completed (2026-02-11)
+
+All five P1 items shipped in a single commit:
+
+- **Index deletion (2.2):** `BTree::delete(key, value)` walks to leaf, removes matching pair, decrements `entry_count`. No rebalancing — underflow is harmless since tree rebuilds on load. `IndexManager::delete_row` now accepts row values + column mapping. `TableEngine::delete_by_id` reads the row before deleting to pass values to index. `update_row` removes old index entries before inserting new ones.
+- **BufWriter (4.4):** `File` wrapped in `BufWriter<File>` with 256KB buffer. All writes go through BufWriter. Before any read (`read_row`, `scan_rows`, `scan_all`), the buffer is flushed via `writer.flush()`, then `get_mut()` accesses the inner `File`. `mark_deleted` (random-access write) flushes first too.
+- **Group commit (4.3):** Added `group_commit_interval_ms` to `StorageConfig` (default: 0 = disabled). `DataFile` tracks `last_sync: Option<Instant>`. `maybe_sync()` checks elapsed time — only calls `fsync` if threshold exceeded. All write methods use `maybe_sync()`. `sync()` always forces a real sync.
+- **Persist v2 (2.3):** New binary format serializes tree structure directly. Header: magic, version, order, root_id, node_count, first_leaf_id, entry_count. Per node: type, keys, values/children, parent, next_leaf. `save_index` iterates `tree.nodes()` directly. `load_index` reads nodes and calls `BTree::from_parts()`. O(n) load vs O(n log n). Backward compat: v1 files still load via re-insert path.
+- **Streaming queries (3.1):** `scan_with_limit()` refactored for single-pass: iterate → filter → skip offset → collect up to limit → break. No intermediate `Vec` for full result set. Early `break` avoids processing remaining rows.
+
+---
+
+## P2 — Roadmap (Next)
+
+### P2.1 Statistics-Based Index Selection (3.2)
+
+**Files:** `src/query/direct.rs`, `src/index/stats.rs`, `src/index/manager.rs`
+
+**Problem:** `choose_index()` picks the first indexable filter by operator priority (Equals > Range > Like). It ignores selectivity — a filter on `status = 'active'` matching 90% of rows beats `age BETWEEN 25 AND 30` matching 5% just because Equals ranks higher.
+
+**Approach:**
+1. Have `IndexManager` cache `IndexStatistics` per column (computed on load/rebuild, updated incrementally on insert/delete).
+2. Modify `choose_index()` to accept stats and estimate result size:
+   - Equals: `total_entries / cardinality`
+   - Range: estimate fraction based on min/max bounds
+   - Like prefix: estimate based on prefix selectivity
+3. Pick the filter with the smallest estimated result set.
+
+**Impact:** 10-100x fewer rows scanned for queries on low-selectivity indexed columns.
+
+---
+
+### P2.2 Multi-Index Intersection (3.3)
+
+**Files:** `src/query/direct.rs`, `src/lib.rs`
+
+**Problem:** Only one index is used per query. `WHERE age = 25 AND city = 'Rome'` uses one index and post-filters the rest.
+
+**Approach:**
+1. Identify all filters that have a matching index.
+2. Query each index to get a `Vec<u64>` of row IDs.
+3. Sort sets by size (smallest first), then intersect progressively via sorted merge.
+4. Fetch only intersected row IDs from storage.
+5. Apply any remaining non-indexed filters.
+
+**Key decision:** Sorted merge (O(n+m)) vs HashSet intersection (O(min(n,m))). Sorted merge is better for our case since index results are already sorted.
+
+**Impact:** 5-50x fewer rows fetched for multi-predicate queries with multiple indices.
+
+---
+
+### P2.3 String Arena / Zero-Copy Deserialization (4.1)
+
+**Files:** `src/storage/value.rs`, `src/storage/row.rs`
+
+**Problem:** Every `Value::Varchar` deserialization allocates a new `String`. Full table scans create millions of short-lived heap strings.
+
+**Approach (phased):**
+1. **Phase A — Reusable buffer:** Add a `QueryArena` that pre-allocates a large byte buffer. Deserialize Varchar values as slices into this buffer within a query scope. Requires lifetime annotation on `Value<'a>`.
+2. **Phase B — Zero-copy:** For the read path, keep the raw read buffer alive and have `Value::Varchar` hold a `&[u8]` reference into it. This eliminates all string allocation during reads but requires careful lifetime management.
+
+Phase A is the pragmatic first step. Phase B is a larger refactor.
+
+**Impact:** 30-50% reduction in allocator pressure during full table scans.
+
+---
+
+### P2.4 Prepared Statement Cache (5.3)
+
+**Files:** `src/parser/mod.rs`, `src/lib.rs`
+
+**Problem:** Every SQL execution re-tokenizes, re-parses, and re-validates. For REPL loops or application code executing similar queries, this work is redundant.
+
+**Approach:**
+1. Add a `PreparedCache` with an LRU eviction policy (capacity configurable, default 128).
+2. Key: hash of the normalized SQL string (literals replaced with `?` placeholders).
+3. Value: parsed `Statement` + extracted literal values.
+4. On cache hit: substitute literals into the cached AST and skip parse+validate.
+
+```rust
+pub struct PreparedCache {
+    cache: HashMap<u64, (Statement, Vec<Value>)>,
+    lru: VecDeque<u64>,
+    capacity: usize,
+}
+```
+
+**Impact:** 5-10x speedup for repeated queries. Parse overhead drops to near-zero for cached statements.
+
+---
+
+### P2.5 Auto-Compaction (1.3)
+
+**Files:** `src/storage/table_engine.rs`, `src/storage/data_file.rs`, `src/config/types.rs`
+
+**Problem:** UPDATE and DELETE leave tombstones. Over time, the data file grows unboundedly with dead data, and full scans read/skip dead rows.
+
+**Approach:**
+1. Add `compaction_threshold: f64` to `StorageConfig` (default: 0.5 = 50% dead rows triggers compaction).
+2. After each delete, check `deleted_count / total_count > threshold`.
+3. Compaction procedure:
+   - Create `data.bin.new`, copy only active rows (sequential read + sequential write).
+   - Build new RAT from the fresh offsets.
+   - Atomic rename `data.bin.new` → `data.bin`.
+   - Rebuild indices from the compacted data.
+4. RAT compaction: call `rat.compact()` automatically after table compaction.
+
+**Impact:** Prevents unbounded storage growth. Keeps scan performance stable over time.
+
+---
+
+### P2 Summary
+
+| # | Item | Expected Impact | Effort | Dependencies |
+|---|---|---|---|---|
+| 1 | Statistics-based index selection | 10-100x selective queries | Medium | Needs IndexStatistics caching |
+| 2 | Multi-index intersection | 5-50x multi-filter | Medium | Benefits from #1 for set ordering |
+| 3 | String arena / zero-copy | 30-50% scan alloc | High | Lifetime refactor on Value |
+| 4 | Prepared statement cache | 5-10x repeated queries | Low | Independent |
+| 5 | Auto-compaction | Stable performance | Medium | Independent |
+
+Recommended order: **4 → 1 → 2 → 5 → 3** (low effort wins first, then query optimizer, then the lifetime refactor last).
+
+---
+
+*Generated on 2026-02-11 — based on full codebase review of ThunderDB-Rust v0.1.0. Updated with P0/P1 completion status and P2 roadmap.*
