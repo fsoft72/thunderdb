@@ -125,14 +125,28 @@ impl IndexManager {
 
     /// Remove a row from all indices
     ///
+    /// For each indexed column, extracts the value from the row's values
+    /// and calls btree.delete(value, row_id) to remove the entry.
+    ///
     /// # Arguments
     /// * `row_id` - Row ID to remove
-    ///
-    /// Note: Current BTree doesn't support deletion, so this is a TODO
-    pub fn delete_row(&mut self, _row_id: u64) -> Result<()> {
-        // TODO: Implement BTree deletion
-        // For now, indices will contain deleted row IDs
-        // They'll be filtered out during query execution
+    /// * `values` - The row's column values
+    /// * `column_mapping` - Maps column names to positions in values
+    pub fn delete_row(
+        &mut self,
+        row_id: u64,
+        values: &[Value],
+        column_mapping: &HashMap<String, usize>,
+    ) -> Result<()> {
+        for column_name in &self.indexed_columns {
+            if let Some(&col_idx) = column_mapping.get(column_name) {
+                if let Some(value) = values.get(col_idx) {
+                    if let Some(index) = self.indices.get_mut(column_name) {
+                        index.delete(value, &row_id);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

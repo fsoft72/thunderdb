@@ -1,16 +1,19 @@
 use crate::error::{Error, Result};
 use crate::storage::row::Row;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Tombstone marker for deleted rows (single byte prefix)
 const TOMBSTONE_MARKER: u8 = 0xFF;
 const ACTIVE_MARKER: u8 = 0x00;
 
+/// BufWriter capacity: 256 KB
+const BUF_WRITER_CAPACITY: usize = 256 * 1024;
+
 enum DataFileBackend {
     #[allow(dead_code)]
-    File(File),
+    File(BufWriter<File>),
     Memory(Vec<u8>),
 }
 
@@ -27,6 +30,10 @@ pub struct DataFile {
     fsync_on_write: bool,
     write_buffer: Vec<u8>,
     read_buffer: Vec<u8>,
+    /// Group commit: time of last sync (None = never synced)
+    last_sync: Option<std::time::Instant>,
+    /// Group commit interval in ms (0 = disabled)
+    group_commit_ms: u64,
 }
 
 impl DataFile {
@@ -36,8 +43,23 @@ impl DataFile {
     /// * `path` - Path to the data.bin file
     /// * `fsync_on_write` - Whether to call fsync after each write
     pub fn open<P: AsRef<Path>>(path: P, fsync_on_write: bool) -> Result<Self> {
+        Self::open_with_group_commit(path, fsync_on_write, 0)
+    }
+
+    /// Open or create a data file with group commit support
+    ///
+    /// # Arguments
+    /// * `path` - Path to the data.bin file
+    /// * `fsync_on_write` - Whether to call fsync after each write
+    /// * `group_commit_ms` - Group commit interval in ms (0 = disabled)
+    pub fn open_with_group_commit<P: AsRef<Path>>(
+        path: P,
+        fsync_on_write: bool,
+        group_commit_ms: u64,
+    ) -> Result<Self> {
         let _path_buf = path.as_ref().to_path_buf();
         let _fsync = fsync_on_write;
+        let _group_ms = group_commit_ms;
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -52,11 +74,13 @@ impl DataFile {
 
             Ok(Self {
                 path: _path_buf,
-                backend: DataFileBackend::File(file),
+                backend: DataFileBackend::File(BufWriter::with_capacity(BUF_WRITER_CAPACITY, file)),
                 current_offset,
                 fsync_on_write: _fsync,
                 write_buffer: Vec::with_capacity(1024),
                 read_buffer: Vec::with_capacity(1024),
+                last_sync: None,
+                group_commit_ms: _group_ms,
             })
         }
         #[cfg(target_arch = "wasm32")]
@@ -74,6 +98,8 @@ impl DataFile {
             fsync_on_write: false,
             write_buffer: Vec::with_capacity(1024),
             read_buffer: Vec::with_capacity(1024),
+            last_sync: None,
+            group_commit_ms: 0,
         })
     }
 
@@ -93,22 +119,18 @@ impl DataFile {
         let offset = self.current_offset;
 
         match &mut self.backend {
-            DataFileBackend::File(file) => {
+            DataFileBackend::File(writer) => {
                 // Seek to end of file
-                file.seek(SeekFrom::End(0))?;
+                writer.seek(SeekFrom::End(0))?;
 
                 // Write status marker (active)
-                file.write_all(&[ACTIVE_MARKER])?;
+                writer.write_all(&[ACTIVE_MARKER])?;
 
                 // Write length prefix
-                file.write_all(&length.to_le_bytes())?;
+                writer.write_all(&length.to_le_bytes())?;
 
                 // Write row data
-                file.write_all(&self.write_buffer)?;
-
-                if self.fsync_on_write {
-                    file.sync_all()?;
-                }
+                writer.write_all(&self.write_buffer)?;
             }
             DataFileBackend::Memory(data) => {
                 data.push(ACTIVE_MARKER);
@@ -119,6 +141,9 @@ impl DataFile {
 
         // Update current offset (1 byte marker + 4 bytes length + row data)
         self.current_offset += 1 + 4 + length as u64;
+
+        // Group-commit-aware sync
+        self.maybe_sync()?;
 
         Ok((offset, length))
     }
@@ -165,13 +190,9 @@ impl DataFile {
         // Single I/O write for the entire batch
         let total_bytes = self.write_buffer.len() as u64;
         match &mut self.backend {
-            DataFileBackend::File(file) => {
-                file.seek(SeekFrom::End(0))?;
-                file.write_all(&self.write_buffer)?;
-
-                if self.fsync_on_write {
-                    file.sync_all()?;
-                }
+            DataFileBackend::File(writer) => {
+                writer.seek(SeekFrom::End(0))?;
+                writer.write_all(&self.write_buffer)?;
             }
             DataFileBackend::Memory(data) => {
                 data.extend_from_slice(&self.write_buffer);
@@ -179,6 +200,9 @@ impl DataFile {
         }
 
         self.current_offset += total_bytes;
+
+        // Group-commit-aware sync
+        self.maybe_sync()?;
 
         Ok(positions)
     }
@@ -195,7 +219,11 @@ impl DataFile {
         let total_to_read = 1 + 4 + length as usize;
 
         match &mut self.backend {
-            DataFileBackend::File(file) => {
+            DataFileBackend::File(writer) => {
+                // Flush buffered writes before reading
+                writer.flush()?;
+                let file = writer.get_mut();
+
                 // Seek to offset
                 file.seek(SeekFrom::Start(offset))?;
 
@@ -203,7 +231,7 @@ impl DataFile {
                 if self.read_buffer.len() < total_to_read {
                     self.read_buffer.resize(total_to_read, 0);
                 }
-                
+
                 file.read_exact(&mut self.read_buffer[..total_to_read])?;
 
                 // Check status marker
@@ -267,16 +295,16 @@ impl DataFile {
     /// * `offset` - Byte offset where the row starts
     pub fn mark_deleted(&mut self, offset: u64) -> Result<()> {
         match &mut self.backend {
-            DataFileBackend::File(file) => {
+            DataFileBackend::File(writer) => {
+                // Flush buffered writes before random-access write
+                writer.flush()?;
+                let file = writer.get_mut();
+
                 // Seek to offset
                 file.seek(SeekFrom::Start(offset))?;
 
                 // Write tombstone marker
                 file.write_all(&[TOMBSTONE_MARKER])?;
-
-                if self.fsync_on_write {
-                    file.sync_all()?;
-                }
             }
             DataFileBackend::Memory(data) => {
                 let idx = offset as usize;
@@ -288,13 +316,49 @@ impl DataFile {
             }
         }
 
+        // Group-commit-aware sync
+        self.maybe_sync()?;
+
         Ok(())
     }
 
-    /// Force synchronize file to disk
+    /// Force synchronize file to disk (always syncs regardless of group commit timer)
     pub fn sync(&mut self) -> Result<()> {
-        if let DataFileBackend::File(file) = &mut self.backend {
-            file.sync_all()?;
+        if let DataFileBackend::File(writer) = &mut self.backend {
+            writer.flush()?;
+            writer.get_mut().sync_all()?;
+            self.last_sync = Some(std::time::Instant::now());
+        }
+        Ok(())
+    }
+
+    /// Conditionally sync based on group commit interval
+    ///
+    /// If group_commit_ms == 0: immediate sync (current behavior).
+    /// If group_commit_ms > 0: only sync if enough time has elapsed.
+    fn maybe_sync(&mut self) -> Result<()> {
+        if !self.fsync_on_write {
+            return Ok(());
+        }
+
+        if let DataFileBackend::File(writer) = &mut self.backend {
+            if self.group_commit_ms == 0 {
+                // Immediate sync
+                writer.flush()?;
+                writer.get_mut().sync_all()?;
+                self.last_sync = Some(std::time::Instant::now());
+            } else {
+                // Group commit: only sync if threshold exceeded
+                let should_sync = match self.last_sync {
+                    None => true,
+                    Some(last) => last.elapsed().as_millis() >= self.group_commit_ms as u128,
+                };
+                if should_sync {
+                    writer.flush()?;
+                    writer.get_mut().sync_all()?;
+                    self.last_sync = Some(std::time::Instant::now());
+                }
+            }
         }
         Ok(())
     }
@@ -315,7 +379,11 @@ impl DataFile {
         let mut row_buffer = Vec::with_capacity(1024);
         
         match &mut self.backend {
-            DataFileBackend::File(file) => {
+            DataFileBackend::File(writer) => {
+                // Flush buffered writes before scanning
+                writer.flush()?;
+                let file = writer.get_mut();
+
                 file.seek(SeekFrom::Start(0))?;
                 loop {
                     let mut marker = [0u8; 1];
@@ -369,7 +437,11 @@ impl DataFile {
         let mut results = Vec::new();
 
         match &mut self.backend {
-            DataFileBackend::File(file) => {
+            DataFileBackend::File(writer) => {
+                // Flush buffered writes before scanning
+                writer.flush()?;
+                let file = writer.get_mut();
+
                 file.seek(SeekFrom::Start(0))?;
                 let mut offset = 0u64;
                 loop {

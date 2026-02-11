@@ -277,7 +277,7 @@ impl DirectDataAccess for Database {
         offset: Option<usize>,
     ) -> Result<Vec<Row>> {
         let table_engine = self.get_table_mut(table)?;
-        
+
         // Build column mapping from schema if available
         let mut column_mapping = std::collections::HashMap::new();
         if let Some(schema) = table_engine.schema() {
@@ -288,7 +288,7 @@ impl DirectDataAccess for Database {
 
         // Try to use an index
         let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
-        let mut rows = if let Some((col, op)) = choose_index(&filters, &indexed_columns) {
+        let source_rows = if let Some((col, op)) = choose_index(&filters, &indexed_columns) {
             match op {
                 Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
                 Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
@@ -314,28 +314,27 @@ impl DirectDataAccess for Database {
             table_engine.scan_all()?
         };
 
-        // Apply remaining filters (the ones not handled by index)
-        if !filters.is_empty() {
-            rows.retain(|row| {
-                apply_filters(row, &filters, &column_mapping)
-            });
-        }
+        // Single-pass: filter + offset + limit with early termination
+        let offset_val = offset.unwrap_or(0);
+        let limit_val = limit.unwrap_or(usize::MAX);
+        let mut skipped = 0usize;
+        let mut result = Vec::new();
 
-        // Apply offset
-        if let Some(offset_val) = offset {
-            if offset_val < rows.len() {
-                rows = rows.into_iter().skip(offset_val).collect();
-            } else {
-                rows.clear();
+        for row in source_rows {
+            if !filters.is_empty() && !apply_filters(&row, &filters, &column_mapping) {
+                continue;
+            }
+            if skipped < offset_val {
+                skipped += 1;
+                continue;
+            }
+            result.push(row);
+            if result.len() >= limit_val {
+                break;
             }
         }
 
-        // Apply limit
-        if let Some(limit_val) = limit {
-            rows.truncate(limit_val);
-        }
-
-        Ok(rows)
+        Ok(result)
     }
 
     fn update(

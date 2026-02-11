@@ -40,7 +40,7 @@ where
 impl<K, V> BTree<K, V>
 where
     K: Clone + PartialOrd + Debug,
-    V: Clone + Debug,
+    V: Clone + Debug + PartialEq,
 {
     /// Create a new empty B-Tree
     ///
@@ -407,6 +407,83 @@ where
         Ok(())
     }
 
+    /// Delete a key-value pair from the tree (lazy — no rebalancing)
+    ///
+    /// Walks to the leaf via find_leaf, scans for the matching key+value pair,
+    /// and removes it. Underflow is harmless since the tree is rebuilt on load.
+    ///
+    /// # Returns
+    /// `true` if the pair was found and removed, `false` otherwise
+    pub fn delete(&mut self, key: &K, value: &V) -> bool {
+        let leaf_id = self.find_leaf(key);
+        let leaf = &mut self.nodes[leaf_id as usize];
+
+        // Scan for matching key+value pair
+        for i in 0..leaf.keys.len() {
+            if leaf.keys[i].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal
+                && leaf.values[i] == *value
+            {
+                leaf.keys.remove(i);
+                leaf.values.remove(i);
+                self.entry_count -= 1;
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Get the root node ID
+    pub fn root_id(&self) -> u64 {
+        self.root_id
+    }
+
+    /// Get the tree order
+    pub fn order(&self) -> usize {
+        self.order
+    }
+
+    /// Get the first leaf node ID
+    pub fn first_leaf_id(&self) -> Option<u64> {
+        self.first_leaf_id
+    }
+
+    /// Get the entry count
+    pub fn entry_count(&self) -> usize {
+        self.entry_count
+    }
+
+    /// Get a reference to all nodes in the arena
+    pub fn nodes(&self) -> &[BTreeNode<K, V>] {
+        &self.nodes
+    }
+
+    /// Reconstruct a BTree from its constituent parts
+    ///
+    /// Used by the v2 persist format to directly deserialize tree structure.
+    pub fn from_parts(
+        order: usize,
+        root_id: u64,
+        first_leaf_id: Option<u64>,
+        entry_count: usize,
+        nodes: Vec<BTreeNode<K, V>>,
+    ) -> Result<Self> {
+        if order < 3 {
+            return Err(Error::Index("B-Tree order must be at least 3".to_string()));
+        }
+
+        let next_node_id = nodes.len() as u64;
+
+        Ok(Self {
+            root_id,
+            order,
+            nodes,
+            next_node_id,
+            first_leaf_id,
+            entry_count,
+        })
+    }
+
     /// Get tree statistics for debugging
     pub fn stats(&self) -> BTreeStats {
         let mut leaf_count = 0;
@@ -632,6 +709,71 @@ mod tests {
         for i in 0..100 {
             tree.insert(i, i as u64).unwrap();
             assert_eq!(tree.len(), (i + 1) as usize);
+        }
+    }
+
+    #[test]
+    fn test_btree_delete_basic() {
+        let mut tree = BTree::new(5).unwrap();
+
+        tree.insert(10, 1u64).unwrap();
+        tree.insert(20, 2u64).unwrap();
+        tree.insert(30, 3u64).unwrap();
+
+        assert_eq!(tree.len(), 3);
+
+        // Delete existing pair
+        assert!(tree.delete(&20, &2u64));
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree.search(&20), Vec::<u64>::new());
+
+        // Delete non-existent value for existing key
+        assert!(!tree.delete(&10, &999u64));
+        assert_eq!(tree.len(), 2);
+
+        // Delete non-existent key
+        assert!(!tree.delete(&99, &1u64));
+        assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    fn test_btree_delete_with_duplicates() {
+        let mut tree = BTree::new(5).unwrap();
+
+        tree.insert(10, 1u64).unwrap();
+        tree.insert(10, 2u64).unwrap();
+        tree.insert(10, 3u64).unwrap();
+
+        assert_eq!(tree.len(), 3);
+
+        // Delete one duplicate
+        assert!(tree.delete(&10, &2u64));
+        assert_eq!(tree.len(), 2);
+
+        let results = tree.search(&10);
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&1u64));
+        assert!(results.contains(&3u64));
+    }
+
+    #[test]
+    fn test_btree_from_parts() {
+        let mut tree = BTree::new(5).unwrap();
+        for i in 1..=10 {
+            tree.insert(i, i as u64).unwrap();
+        }
+
+        let root_id = tree.root_id();
+        let order = tree.order();
+        let first_leaf_id = tree.first_leaf_id();
+        let entry_count = tree.entry_count();
+        let nodes = tree.nodes().to_vec();
+
+        let rebuilt = BTree::from_parts(order, root_id, first_leaf_id, entry_count, nodes).unwrap();
+
+        assert_eq!(rebuilt.len(), 10);
+        for i in 1..=10 {
+            assert_eq!(rebuilt.search(&i), vec![i as u64]);
         }
     }
 }

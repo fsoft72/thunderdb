@@ -31,6 +31,13 @@ pub struct StorageConfig {
     /// Whether to operate in memory-only mode
     #[serde(default)]
     pub in_memory: bool,
+
+    /// Group commit interval in milliseconds (0 = disabled, immediate sync)
+    ///
+    /// When > 0 and fsync_on_write is true, syncs are batched — only
+    /// performed if this many ms have elapsed since the last sync.
+    #[serde(default)]
+    pub group_commit_interval_ms: u64,
 }
 
 /// Index configuration
@@ -145,6 +152,7 @@ impl Default for DatabaseConfig {
                 fsync_interval_ms: default_fsync_interval(),
                 max_data_file_size_mb: default_max_file_size(),
                 in_memory: false,
+                group_commit_interval_ms: 0,
             },
             index: IndexConfig {
                 btree_order: default_btree_order(),

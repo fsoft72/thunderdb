@@ -62,7 +62,11 @@ impl TableEngine {
 
         // Open data file
         let data_path = table_dir.join("data.bin");
-        let data_file = DataFile::open(&data_path, config.fsync_on_write)?;
+        let data_file = DataFile::open_with_group_commit(
+            &data_path,
+            config.fsync_on_write,
+            config.group_commit_interval_ms,
+        )?;
 
         // Load RAT
         let rat_path = table_dir.join("rat.bin");
@@ -235,13 +239,8 @@ impl TableEngine {
         self.rat.insert(row_id, offset, length)?;
 
         // Update indices
-        if ! self.index_manager.indexed_columns().is_empty() {
-            let mut mapping = std::collections::HashMap::new();
-            if let Some(schema) = &self.schema {
-                for (i, col) in schema.columns.iter().enumerate() {
-                    mapping.insert(col.name.clone(), i);
-                }
-            }
+        if !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
             self.index_manager.insert_row(&row, &mapping)?;
         }
 
@@ -286,13 +285,8 @@ impl TableEngine {
         self.rat.bulk_insert(rat_entries)?;
 
         // 5. Batch index updates (column mapping computed once)
-        if ! self.index_manager.indexed_columns().is_empty() {
-            let mut mapping = std::collections::HashMap::new();
-            if let Some(schema) = &self.schema {
-                for (i, col) in schema.columns.iter().enumerate() {
-                    mapping.insert(col.name.clone(), i);
-                }
-            }
+        if !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
             for row in &row_objects {
                 self.index_manager.insert_row(row, &mapping)?;
             }
@@ -320,6 +314,8 @@ impl TableEngine {
 
     /// Update a row by ID
     ///
+    /// Reads old row to remove stale index entries, then appends new row.
+    ///
     /// # Arguments
     /// * `row_id` - Row ID to update
     /// * `values` - New column values
@@ -327,10 +323,18 @@ impl TableEngine {
     /// # Returns
     /// true if row was found and updated, false otherwise
     pub fn update_row(&mut self, row_id: u64, values: Vec<Value>) -> Result<bool> {
-        if let Some((offset, _length)) = self.rat.get(row_id) {
+        if let Some((offset, length)) = self.rat.get(row_id) {
+            // Read old row for index deletion
+            let old_values = if !self.index_manager.indexed_columns().is_empty() {
+                self.data_file.read_row(offset, length)?
+                    .map(|row| row.values)
+            } else {
+                None
+            };
+
             // Mark old row as deleted in data file
             self.data_file.mark_deleted(offset)?;
-            
+
             // Mark as deleted in RAT so insert can overwrite it
             self.rat.delete(row_id);
 
@@ -343,13 +347,11 @@ impl TableEngine {
             // Update RAT with new position (now allowed because it's deleted)
             self.rat.insert(row_id, new_offset, new_length)?;
 
-            // Update indices
-            if ! self.index_manager.indexed_columns().is_empty() {
-                let mut mapping = std::collections::HashMap::new();
-                if let Some(schema) = &self.schema {
-                    for (i, col) in schema.columns.iter().enumerate() {
-                        mapping.insert(col.name.clone(), i);
-                    }
+            // Update indices: remove old entries, insert new ones
+            if !self.index_manager.indexed_columns().is_empty() {
+                let mapping = self.build_column_mapping();
+                if let Some(old_vals) = old_values {
+                    self.index_manager.delete_row(row_id, &old_vals, &mapping)?;
                 }
                 self.index_manager.insert_row(&row, &mapping)?;
             }
@@ -362,21 +364,34 @@ impl TableEngine {
 
     /// Delete a row by ID
     ///
+    /// Reads the row before marking it deleted so we can remove it from indices.
+    ///
     /// # Arguments
     /// * `row_id` - Row ID to delete
     ///
     /// # Returns
     /// true if row was found and deleted, false otherwise
     pub fn delete_by_id(&mut self, row_id: u64) -> Result<bool> {
-        if let Some((offset, _length)) = self.rat.get(row_id) {
+        if let Some((offset, length)) = self.rat.get(row_id) {
+            // Read the row before deleting so we can remove from indices
+            let old_values = if !self.index_manager.indexed_columns().is_empty() {
+                self.data_file.read_row(offset, length)?
+                    .map(|row| row.values)
+            } else {
+                None
+            };
+
             // Mark as deleted in data file
             self.data_file.mark_deleted(offset)?;
 
             // Mark as deleted in RAT
             self.rat.delete(row_id);
 
-            // Mark as deleted in indices
-            self.index_manager.delete_row(row_id)?;
+            // Remove from indices using old values
+            if let Some(values) = old_values {
+                let mapping = self.build_column_mapping();
+                self.index_manager.delete_row(row_id, &values, &mapping)?;
+            }
 
             Ok(true)
         } else {
@@ -538,6 +553,17 @@ impl TableEngine {
         Ok(rows)
     }
 
+    /// Build a column name -> position mapping from the schema
+    fn build_column_mapping(&self) -> std::collections::HashMap<String, usize> {
+        let mut mapping = std::collections::HashMap::new();
+        if let Some(schema) = &self.schema {
+            for (i, col) in schema.columns.iter().enumerate() {
+                mapping.insert(col.name.clone(), i);
+            }
+        }
+        mapping
+    }
+
     /// Get index manager
     pub fn index_manager(&self) -> &IndexManager {
         &self.index_manager
@@ -632,6 +658,7 @@ mod tests {
             fsync_interval_ms: 1000,
             max_data_file_size_mb: 1024,
             in_memory: false,
+            group_commit_interval_ms: 0,
         };
 
         TableEngine::create(name, &base_dir, config).unwrap()
@@ -750,6 +777,7 @@ mod tests {
             fsync_interval_ms: 1000,
             max_data_file_size_mb: 1024,
             in_memory: false,
+            group_commit_interval_ms: 0,
         };
 
         // Create table and insert data
@@ -819,6 +847,7 @@ mod tests {
             fsync_interval_ms: 1000,
             max_data_file_size_mb: 1024,
             in_memory: false,
+            group_commit_interval_ms: 0,
         };
 
         // Create table and insert data
