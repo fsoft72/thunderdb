@@ -38,6 +38,17 @@ pub struct StorageConfig {
     /// performed if this many ms have elapsed since the last sync.
     #[serde(default)]
     pub group_commit_interval_ms: u64,
+
+    /// Fraction of dead rows that triggers auto-compaction (0.0–1.0)
+    ///
+    /// When (total - active) / total >= this threshold, a full compaction
+    /// is triggered automatically after a delete. Default 0.5.
+    #[serde(default = "default_compaction_threshold")]
+    pub compaction_threshold: f64,
+
+    /// Whether auto-compaction is enabled
+    #[serde(default)]
+    pub auto_compact: bool,
 }
 
 /// Index configuration
@@ -121,6 +132,10 @@ const fn default_max_limit() -> usize {
     100000
 }
 
+const fn default_compaction_threshold() -> f64 {
+    0.5
+}
+
 fn default_history_file() -> String {
     ".thunderdb_history".to_string()
 }
@@ -153,6 +168,8 @@ impl Default for DatabaseConfig {
                 max_data_file_size_mb: default_max_file_size(),
                 in_memory: false,
                 group_commit_interval_ms: 0,
+                compaction_threshold: default_compaction_threshold(),
+                auto_compact: false,
             },
             index: IndexConfig {
                 btree_order: default_btree_order(),

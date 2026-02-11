@@ -393,6 +393,15 @@ impl TableEngine {
                 self.index_manager.delete_row(row_id, &values, &mapping)?;
             }
 
+            // Auto-compact if threshold exceeded
+            if self.config.auto_compact && self.config.compaction_threshold > 0.0 {
+                let total = self.rat.len();
+                let active = self.rat.active_count();
+                if total > 0 && (total - active) as f64 / total as f64 >= self.config.compaction_threshold {
+                    self.full_compact()?;
+                }
+            }
+
             Ok(true)
         } else {
             Ok(false)
@@ -461,6 +470,68 @@ impl TableEngine {
     pub fn compact(&mut self) -> Result<()> {
         self.rat.compact();
         self.flush()?;
+        Ok(())
+    }
+
+    /// Full compaction: rewrite data.bin to reclaim space from tombstones
+    ///
+    /// Scans all active rows, writes them to a new data file, rebuilds
+    /// the RAT and all indices. Works for both disk and in-memory tables.
+    pub fn full_compact(&mut self) -> Result<()> {
+        let active_rows = self.data_file.scan_rows()?;
+
+        if self.config.in_memory {
+            // In-memory path: create new DataFile, append all rows, swap
+            let mut new_data_file = DataFile::open_in_memory()?;
+            let mut new_rat = RecordAddressTable::new();
+
+            for row in &active_rows {
+                let (offset, length) = new_data_file.append_row(row)?;
+                new_rat.insert(row.row_id, offset, length)?;
+            }
+
+            self.data_file = new_data_file;
+            self.rat = new_rat;
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // Disk path: write to tmp file, atomic rename, reopen
+                let tmp_path = self.table_dir.join("data.bin.tmp");
+                let data_path = self.table_dir.join("data.bin");
+
+                let mut tmp_file = DataFile::open(&tmp_path, true)?;
+                let mut new_rat = RecordAddressTable::new();
+
+                for row in &active_rows {
+                    let (offset, length) = tmp_file.append_row(row)?;
+                    new_rat.insert(row.row_id, offset, length)?;
+                }
+                tmp_file.sync()?;
+
+                // Atomic rename
+                std::fs::rename(&tmp_path, &data_path)?;
+
+                // Reopen the data file
+                self.data_file = DataFile::open_with_group_commit(
+                    &data_path,
+                    self.config.fsync_on_write,
+                    self.config.group_commit_interval_ms,
+                )?;
+                self.rat = new_rat;
+            }
+        }
+
+        // Rebuild all indices from the compacted rows
+        if !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
+            for col in self.index_manager.indexed_columns().to_vec() {
+                self.index_manager.rebuild_index(&col, &active_rows, &mapping)?;
+            }
+        }
+
+        // Persist RAT
+        self.flush()?;
+
         Ok(())
     }
 
@@ -673,6 +744,8 @@ mod tests {
             max_data_file_size_mb: 1024,
             in_memory: false,
             group_commit_interval_ms: 0,
+            compaction_threshold: 0.5,
+            auto_compact: false,
         };
 
         TableEngine::create(name, &base_dir, config).unwrap()
@@ -792,6 +865,8 @@ mod tests {
             max_data_file_size_mb: 1024,
             in_memory: false,
             group_commit_interval_ms: 0,
+            compaction_threshold: 0.5,
+            auto_compact: false,
         };
 
         // Create table and insert data
@@ -862,6 +937,8 @@ mod tests {
             max_data_file_size_mb: 1024,
             in_memory: false,
             group_commit_interval_ms: 0,
+            compaction_threshold: 0.5,
+            auto_compact: false,
         };
 
         // Create table and insert data
@@ -930,5 +1007,159 @@ mod tests {
         assert_eq!(stats.total_rows, 10);
         assert_eq!(stats.active_rows, 9);
         assert!(stats.data_file_size > 0);
+    }
+
+    #[test]
+    fn test_full_compact_disk() {
+        let mut table = create_test_table("test_full_compact");
+
+        for i in 1..=10 {
+            table.insert_row(vec![Value::Int32(i), Value::Varchar(format!("row_{}", i))]).unwrap();
+        }
+
+        // Delete half the rows
+        for i in (1..=10).step_by(2) {
+            table.delete_by_id(i).unwrap();
+        }
+
+        let size_before = table.stats().data_file_size;
+        assert_eq!(table.stats().active_rows, 5);
+
+        table.full_compact().unwrap();
+
+        // After compaction: data file should be smaller, all active rows intact
+        assert!(table.stats().data_file_size < size_before);
+        assert_eq!(table.stats().active_rows, 5);
+        assert_eq!(table.stats().total_rows, 5);
+
+        // Verify rows are still readable
+        for i in (2..=10).step_by(2) {
+            let row = table.get_by_id(i).unwrap();
+            assert!(row.is_some(), "Row {} should exist", i);
+        }
+    }
+
+    #[test]
+    fn test_full_compact_in_memory() {
+        let config = StorageConfig {
+            data_dir: ":memory:".to_string(),
+            fsync_on_write: false,
+            fsync_interval_ms: 1000,
+            max_data_file_size_mb: 1024,
+            in_memory: true,
+            group_commit_interval_ms: 0,
+            compaction_threshold: 0.5,
+            auto_compact: false,
+        };
+
+        let mut table = TableEngine::open_in_memory("test_mem_compact", config).unwrap();
+
+        for i in 1..=10 {
+            table.insert_row(vec![Value::Int32(i)]).unwrap();
+        }
+
+        for i in 1..=5 {
+            table.delete_by_id(i).unwrap();
+        }
+
+        table.full_compact().unwrap();
+
+        assert_eq!(table.stats().active_rows, 5);
+        assert_eq!(table.stats().total_rows, 5);
+
+        for i in 6..=10 {
+            assert!(table.get_by_id(i).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn test_auto_compact_triggers() {
+        let base_dir = "/tmp/thunderdb_test_auto_compact";
+        let _ = fs::remove_dir_all(base_dir);
+
+        let config = StorageConfig {
+            data_dir: base_dir.to_string(),
+            fsync_on_write: false,
+            fsync_interval_ms: 1000,
+            max_data_file_size_mb: 1024,
+            in_memory: false,
+            group_commit_interval_ms: 0,
+            compaction_threshold: 0.5,
+            auto_compact: true,
+        };
+
+        let mut table = TableEngine::create("test", base_dir, config).unwrap();
+
+        for i in 1..=10 {
+            table.insert_row(vec![Value::Int32(i)]).unwrap();
+        }
+
+        // Delete 5 of 10 → 50% dead → should trigger auto-compact
+        for i in 1..=5 {
+            table.delete_by_id(i).unwrap();
+        }
+
+        // After auto-compact, RAT should have only 5 entries
+        assert_eq!(table.stats().total_rows, 5);
+        assert_eq!(table.stats().active_rows, 5);
+
+        fs::remove_dir_all(base_dir).ok();
+    }
+
+    #[test]
+    fn test_auto_compact_disabled() {
+        let mut table = create_test_table("test_auto_compact_off");
+
+        for i in 1..=10 {
+            table.insert_row(vec![Value::Int32(i)]).unwrap();
+        }
+
+        // Delete 8 of 10 → 80% dead, but auto_compact is false
+        for i in 1..=8 {
+            table.delete_by_id(i).unwrap();
+        }
+
+        // RAT should still have all 10 entries (not compacted)
+        assert_eq!(table.stats().total_rows, 10);
+        assert_eq!(table.stats().active_rows, 2);
+    }
+
+    #[test]
+    fn test_full_compact_with_indices() {
+        let mut table = create_test_table("test_compact_idx");
+
+        table.set_schema(TableSchema {
+            columns: vec![
+                ColumnInfo { name: "id".to_string(), data_type: "INT".to_string() },
+                ColumnInfo { name: "name".to_string(), data_type: "VARCHAR".to_string() },
+            ],
+        }).unwrap();
+
+        table.index_manager_mut().create_index("id").unwrap();
+
+        for i in 1..=10 {
+            table.insert_row(vec![Value::Int32(i), Value::Varchar(format!("n{}", i))]).unwrap();
+        }
+
+        // Rebuild index after inserts since insert_row doesn't auto-index without mapping
+        let rows = table.scan_all().unwrap();
+        let mut mapping = std::collections::HashMap::new();
+        mapping.insert("id".to_string(), 0);
+        mapping.insert("name".to_string(), 1);
+        table.index_manager_mut().rebuild_index("id", &rows, &mapping).unwrap();
+
+        for i in 1..=5 {
+            table.delete_by_id(i).unwrap();
+        }
+
+        table.full_compact().unwrap();
+
+        // Verify index still works after compaction
+        let results = table.index_manager().search("id", &Value::Int32(7)).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Row data is correct
+        let row = table.get_by_id(results[0]).unwrap().unwrap();
+        assert_eq!(row.values[0], Value::Int32(7));
     }
 }
