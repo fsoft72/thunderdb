@@ -61,6 +61,7 @@ impl PreparedCache {
     /// Insert a parsed statement into the cache
     ///
     /// If the cache is at capacity, evicts the least-recently-used entry.
+    #[allow(clippy::map_entry)]
     pub fn insert(&mut self, sql: &str, stmt: Statement) {
         let key = fnv1a_hash(sql);
 

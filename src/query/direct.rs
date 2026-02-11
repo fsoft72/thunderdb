@@ -241,7 +241,7 @@ pub fn choose_index(
             } else {
                 usize::MAX
             };
-            if best.as_ref().map_or(true, |b| estimate < b.2) {
+            if best.as_ref().is_none_or(|b| estimate < b.2) {
                 best = Some((col.clone(), op.clone(), estimate));
             }
         }

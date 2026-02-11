@@ -26,7 +26,7 @@ pub enum SmallString {
 
 impl SmallString {
     /// Create from a string slice
-    pub fn from_str(s: &str) -> Self {
+    pub fn new(s: &str) -> Self {
         if s.len() <= INLINE_CAP {
             let mut data = [0u8; INLINE_CAP];
             data[..s.len()].copy_from_slice(s.as_bytes());
@@ -56,7 +56,7 @@ impl SmallString {
     /// Create from a UTF-8 byte slice
     pub fn from_utf8(bytes: &[u8]) -> Result<Self, std::str::Utf8Error> {
         let s = std::str::from_utf8(bytes)?;
-        Ok(Self::from_str(s))
+        Ok(Self::new(s))
     }
 
     /// Get as string slice
@@ -143,7 +143,7 @@ impl From<String> for SmallString {
 
 impl From<&str> for SmallString {
     fn from(s: &str) -> Self {
-        Self::from_str(s)
+        Self::new(s)
     }
 }
 
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_inline_short() {
-        let s = SmallString::from_str("hello");
+        let s = SmallString::new("hello");
         assert!(s.is_inline());
         assert_eq!(s.as_str(), "hello");
         assert_eq!(s.len(), 5);
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_inline_exactly_23() {
-        let s = SmallString::from_str("12345678901234567890123"); // 23 bytes
+        let s = SmallString::new("12345678901234567890123"); // 23 bytes
         assert!(s.is_inline());
         assert_eq!(s.len(), 23);
         assert_eq!(s.as_str(), "12345678901234567890123");
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_heap_24_bytes() {
-        let s = SmallString::from_str("123456789012345678901234"); // 24 bytes
+        let s = SmallString::new("123456789012345678901234"); // 24 bytes
         assert!(!s.is_inline());
         assert_eq!(s.len(), 24);
         assert_eq!(s.as_str(), "123456789012345678901234");
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let s = SmallString::from_str("");
+        let s = SmallString::new("");
         assert!(s.is_inline());
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
@@ -210,37 +210,37 @@ mod tests {
 
     #[test]
     fn test_as_bytes() {
-        let s = SmallString::from_str("abc");
+        let s = SmallString::new("abc");
         assert_eq!(s.as_bytes(), b"abc");
     }
 
     #[test]
     fn test_clone() {
-        let s1 = SmallString::from_str("hello");
+        let s1 = SmallString::new("hello");
         let s2 = s1.clone();
         assert_eq!(s1, s2);
     }
 
     #[test]
     fn test_equality() {
-        let a = SmallString::from_str("hello");
-        let b = SmallString::from_str("hello");
-        let c = SmallString::from_str("world");
+        let a = SmallString::new("hello");
+        let b = SmallString::new("hello");
+        let c = SmallString::new("world");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
 
     #[test]
     fn test_ordering() {
-        let a = SmallString::from_str("alice");
-        let b = SmallString::from_str("bob");
+        let a = SmallString::new("alice");
+        let b = SmallString::new("bob");
         assert!(a < b);
         assert!(b > a);
     }
 
     #[test]
     fn test_display() {
-        let s = SmallString::from_str("test");
+        let s = SmallString::new("test");
         assert_eq!(format!("{}", s), "test");
     }
 
@@ -256,13 +256,13 @@ mod tests {
     #[test]
     fn test_unicode() {
         // Japanese "konnichiwa" — 15 bytes UTF-8 (fits inline)
-        let s = SmallString::from_str("こんにちは");
+        let s = SmallString::new("こんにちは");
         assert!(s.is_inline());
         assert_eq!(s.as_str(), "こんにちは");
 
         // Emoji string that exceeds 23 bytes
         let long_emoji = "🌍🌎🌏🌍🌎🌏"; // 6 * 4 = 24 bytes
-        let s = SmallString::from_str(long_emoji);
+        let s = SmallString::new(long_emoji);
         assert!(!s.is_inline());
         assert_eq!(s.as_str(), long_emoji);
     }
@@ -271,9 +271,9 @@ mod tests {
     fn test_hash() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(SmallString::from_str("hello"));
-        set.insert(SmallString::from_str("hello"));
-        set.insert(SmallString::from_str("world"));
+        set.insert(SmallString::new("hello"));
+        set.insert(SmallString::new("hello"));
+        set.insert(SmallString::new("world"));
         assert_eq!(set.len(), 2);
     }
 }
