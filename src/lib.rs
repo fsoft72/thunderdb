@@ -24,7 +24,7 @@ pub use error::{Error, Result};
 pub use storage::{Value, Row, TableEngine};
 pub use index::{IndexManager};
 pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters};
-pub use parser::{parse_sql, Statement};
+pub use parser::{parse_sql, Statement, PreparedCache};
 
 /// ThunderDB version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -41,6 +41,7 @@ pub struct Database {
     #[allow(dead_code)]
     data_dir: PathBuf,
     tables: HashMap<String, TableEngine>,
+    statement_cache: PreparedCache,
 }
 
 impl Database {
@@ -81,6 +82,7 @@ impl Database {
             config,
             data_dir: data_dir.to_path_buf(),
             tables: HashMap::new(),
+            statement_cache: PreparedCache::default(),
         })
     }
 
@@ -94,6 +96,7 @@ impl Database {
             config,
             data_dir: PathBuf::from(":memory:"),
             tables: HashMap::new(),
+            statement_cache: PreparedCache::default(),
         })
     }
 
@@ -214,6 +217,21 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    /// Parse SQL with caching — returns a cached Statement on hit, parses on miss
+    pub fn parse_sql_cached(&mut self, sql: &str) -> Result<Statement> {
+        if let Some(stmt) = self.statement_cache.get(sql) {
+            return Ok(stmt);
+        }
+        let stmt = parse_sql(sql)?;
+        self.statement_cache.insert(sql, stmt.clone());
+        Ok(stmt)
+    }
+
+    /// Clear the prepared statement cache (call after DDL operations)
+    pub fn clear_statement_cache(&mut self) {
+        self.statement_cache.clear();
     }
 
     /// Drop a table

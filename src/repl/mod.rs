@@ -6,7 +6,7 @@ pub mod commands;
 pub mod formatter;
 
 use crate::error::Result;
-use crate::parser::{parse_sql, Statement, Executor};
+use crate::parser::{Statement, Executor};
 use crate::query::DirectDataAccess;
 use crate::repl::commands::{parse_special_command, SpecialCommand};
 use crate::repl::formatter::format_results;
@@ -169,7 +169,7 @@ impl<'a> Repl<'a> {
 
         let start = Instant::now();
 
-        match parse_sql(sql) {
+        match self.database.parse_sql_cached(sql) {
             Ok(stmt) => {
                 let result = self.execute_statement(&stmt);
                 let elapsed = start.elapsed();
@@ -286,11 +286,13 @@ impl<'a> Repl<'a> {
                     }
                 }).collect();
                 table_engine.set_schema(crate::storage::table_engine::TableSchema { columns })?;
+                self.database.clear_statement_cache();
                 println!("Table created: {}", create.name);
                 Ok(())
             }
             Statement::DropTable(table) => {
                 self.database.drop_table(&table)?;
+                self.database.clear_statement_cache();
                 println!("Table dropped: {}", table);
                 Ok(())
             }
