@@ -367,6 +367,38 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Query row IDs from an index using an operator
+    ///
+    /// Returns None if the column is not indexed or the operator is not supported.
+    pub fn query_row_ids(&self, column: &str, operator: &crate::query::Operator) -> Option<Vec<u64>> {
+        if !self.indices.contains_key(column) {
+            return None;
+        }
+
+        use crate::query::Operator;
+        match operator {
+            Operator::Equals(val) => self.search(column, val).ok(),
+            Operator::Between(start, end) => self.range_query(column, start, end).ok(),
+            Operator::GreaterThan(val) => self.greater_than(column, val, false).ok(),
+            Operator::GreaterThanOrEqual(val) => self.greater_than(column, val, true).ok(),
+            Operator::LessThan(val) => self.less_than(column, val, false).ok(),
+            Operator::LessThanOrEqual(val) => self.less_than(column, val, true).ok(),
+            Operator::Like(pattern) => {
+                use crate::index::LikePattern;
+                if let Ok(lp) = LikePattern::parse(pattern) {
+                    if let Some(prefix) = lp.get_prefix() {
+                        self.prefix_search(column, prefix).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Get cached statistics for a specific column's index
     pub fn column_stats(&self, col: &str) -> Option<&IndexStatistics> {
         self.stats_cache.get(col)

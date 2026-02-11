@@ -399,6 +399,20 @@ impl TableEngine {
         }
     }
 
+    /// Get multiple rows by their IDs
+    ///
+    /// Efficiently fetches rows for a set of pre-filtered row IDs (e.g. from
+    /// multi-index intersection). Skips missing/deleted rows.
+    pub fn get_by_ids(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
+        let mut rows = Vec::with_capacity(row_ids.len());
+        for &row_id in row_ids {
+            if let Some(row) = self.get_by_id(row_id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
     /// Get all active row IDs
     pub fn active_row_ids(&self) -> Vec<u64> {
         self.rat.active_row_ids()

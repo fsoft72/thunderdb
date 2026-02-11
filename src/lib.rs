@@ -23,7 +23,7 @@ pub use config::{DatabaseConfig, load_config, save_config};
 pub use error::{Error, Result};
 pub use storage::{Value, Row, TableEngine};
 pub use index::{IndexManager};
-pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters};
+pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters, multi_index_scan};
 pub use parser::{parse_sql, Statement, PreparedCache};
 
 /// ThunderDB version
@@ -304,34 +304,51 @@ impl DirectDataAccess for Database {
             }
         }
 
-        // Try to use an index
-        let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
+        // Collect stats for index selection
         let all_stats = table_engine.index_manager().all_stats();
         let stats_ref = if all_stats.is_empty() { None } else { Some(all_stats) };
-        let source_rows = if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
-            match op {
-                Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
-                Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
-                Operator::GreaterThan(val) => table_engine.greater_than_by_index(&col, &val, false)?,
-                Operator::GreaterThanOrEqual(val) => table_engine.greater_than_by_index(&col, &val, true)?,
-                Operator::LessThan(val) => table_engine.less_than_by_index(&col, &val, false)?,
-                Operator::LessThanOrEqual(val) => table_engine.less_than_by_index(&col, &val, true)?,
-                Operator::Like(pattern) => {
-                    use crate::index::LikePattern;
-                    if let Ok(lp) = LikePattern::parse(&pattern) {
-                        if let Some(prefix) = lp.get_prefix() {
-                            table_engine.prefix_search_by_index(&col, prefix)?
+
+        // Strategy 1: Try multi-index intersection (needs >=2 indexed filters)
+        let mut remaining_filters = Vec::new();
+        let multi_result = multi_index_scan(
+            &filters,
+            table_engine.index_manager(),
+            stats_ref,
+            &mut remaining_filters,
+        );
+
+        let (source_rows, active_filters) = if let Some(row_ids) = multi_result {
+            let rows = table_engine.get_by_ids(&row_ids)?;
+            (rows, remaining_filters)
+        } else {
+            // Strategy 2: Single best index
+            let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
+            let source = if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
+                match op {
+                    Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
+                    Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
+                    Operator::GreaterThan(val) => table_engine.greater_than_by_index(&col, &val, false)?,
+                    Operator::GreaterThanOrEqual(val) => table_engine.greater_than_by_index(&col, &val, true)?,
+                    Operator::LessThan(val) => table_engine.less_than_by_index(&col, &val, false)?,
+                    Operator::LessThanOrEqual(val) => table_engine.less_than_by_index(&col, &val, true)?,
+                    Operator::Like(pattern) => {
+                        use crate::index::LikePattern;
+                        if let Ok(lp) = LikePattern::parse(&pattern) {
+                            if let Some(prefix) = lp.get_prefix() {
+                                table_engine.prefix_search_by_index(&col, prefix)?
+                            } else {
+                                table_engine.scan_all()?
+                            }
                         } else {
                             table_engine.scan_all()?
                         }
-                    } else {
-                        table_engine.scan_all()?
                     }
+                    _ => table_engine.scan_all()?,
                 }
-                _ => table_engine.scan_all()?, // Fallback
-            }
-        } else {
-            table_engine.scan_all()?
+            } else {
+                table_engine.scan_all()?
+            };
+            (source, filters)
         };
 
         // Single-pass: filter + offset + limit with early termination
@@ -341,7 +358,7 @@ impl DirectDataAccess for Database {
         let mut result = Vec::new();
 
         for row in source_rows {
-            if !filters.is_empty() && !apply_filters(&row, &filters, &column_mapping) {
+            if !active_filters.is_empty() && !apply_filters(&row, &active_filters, &column_mapping) {
                 continue;
             }
             if skipped < offset_val {

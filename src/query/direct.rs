@@ -4,6 +4,7 @@
 
 use crate::error::Result;
 use crate::index::stats::IndexStatistics;
+use crate::index::IndexManager;
 use crate::query::{Filter, Operator};
 use crate::storage::{Row, Value};
 use std::collections::HashMap;
@@ -260,6 +261,79 @@ pub fn choose_index(
     Some((col, op))
 }
 
+/// Merge-based O(n+m) intersection of two sorted vectors
+pub fn sorted_intersect(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut result = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                result.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    result
+}
+
+/// Try to use multiple indices for a query, intersecting row ID sets
+///
+/// For each filter, attempts to get row IDs from the index. Filters that
+/// can't use an index are pushed to `remaining_filters` for post-filtering.
+/// If fewer than 2 index sets are found, returns None to fall back to single-index.
+///
+/// # Arguments
+/// * `filters` - All WHERE filters
+/// * `index_mgr` - The table's index manager
+/// * `stats` - Optional statistics for ordering intersection by estimated size
+/// * `remaining_filters` - Output: filters that couldn't use an index
+///
+/// # Returns
+/// Intersected row IDs if at least 2 indices matched, None otherwise
+pub fn multi_index_scan(
+    filters: &[Filter],
+    index_mgr: &IndexManager,
+    stats: Option<&HashMap<String, IndexStatistics>>,
+    remaining_filters: &mut Vec<Filter>,
+) -> Option<Vec<u64>> {
+    let mut indexed_sets: Vec<(Vec<u64>, usize)> = Vec::new();
+
+    for filter in filters {
+        if let Some(row_ids) = index_mgr.query_row_ids(&filter.column, &filter.operator) {
+            let estimate = stats
+                .and_then(|s| s.get(&filter.column))
+                .map(|s| s.estimate_rows(&filter.operator))
+                .unwrap_or(row_ids.len());
+            indexed_sets.push((row_ids, estimate));
+        } else {
+            remaining_filters.push(filter.clone());
+        }
+    }
+
+    if indexed_sets.len() < 2 {
+        return None;
+    }
+
+    // Sort by estimated size (smallest first) for progressive short-circuit intersection
+    indexed_sets.sort_by_key(|(_, est)| *est);
+
+    let mut result = indexed_sets.remove(0).0;
+    result.sort_unstable();
+
+    for (mut set, _) in indexed_sets {
+        if result.is_empty() {
+            return Some(Vec::new());
+        }
+        set.sort_unstable();
+        result = sorted_intersect(&result, &set);
+    }
+
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +500,33 @@ mod tests {
         ctx.rows_matched = 10;
         assert_eq!(ctx.rows_scanned, 100);
         assert_eq!(ctx.rows_matched, 10);
+    }
+
+    #[test]
+    fn test_sorted_intersect_overlap() {
+        let a = vec![1, 3, 5, 7, 9];
+        let b = vec![2, 3, 5, 8, 9, 10];
+        assert_eq!(sorted_intersect(&a, &b), vec![3, 5, 9]);
+    }
+
+    #[test]
+    fn test_sorted_intersect_disjoint() {
+        let a = vec![1, 3, 5];
+        let b = vec![2, 4, 6];
+        assert_eq!(sorted_intersect(&a, &b), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_sorted_intersect_empty() {
+        let a: Vec<u64> = vec![];
+        let b = vec![1, 2, 3];
+        assert_eq!(sorted_intersect(&a, &b), Vec::<u64>::new());
+        assert_eq!(sorted_intersect(&b, &a), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_sorted_intersect_identical() {
+        let a = vec![1, 2, 3];
+        assert_eq!(sorted_intersect(&a, &a), vec![1, 2, 3]);
     }
 }
