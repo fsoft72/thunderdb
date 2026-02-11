@@ -503,17 +503,17 @@ mod tests {
         let _ = fs::remove_file(path);
 
         let mut tree = BTree::new(5).unwrap();
-        tree.insert(Value::Varchar("alice".to_string()), 1).unwrap();
-        tree.insert(Value::Varchar("bob".to_string()), 2).unwrap();
-        tree.insert(Value::Varchar("charlie".to_string()), 3).unwrap();
+        tree.insert(Value::varchar("alice".to_string()), 1).unwrap();
+        tree.insert(Value::varchar("bob".to_string()), 2).unwrap();
+        tree.insert(Value::varchar("charlie".to_string()), 3).unwrap();
 
         save_index(&tree, path).unwrap();
         let loaded = load_index(path).unwrap();
 
         assert_eq!(loaded.len(), 3);
-        assert_eq!(loaded.search(&Value::Varchar("alice".to_string())), vec![1]);
-        assert_eq!(loaded.search(&Value::Varchar("bob".to_string())), vec![2]);
-        assert_eq!(loaded.search(&Value::Varchar("charlie".to_string())), vec![3]);
+        assert_eq!(loaded.search(&Value::varchar("alice".to_string())), vec![1]);
+        assert_eq!(loaded.search(&Value::varchar("bob".to_string())), vec![2]);
+        assert_eq!(loaded.search(&Value::varchar("charlie".to_string())), vec![3]);
 
         fs::remove_file(path).ok();
     }

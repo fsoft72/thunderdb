@@ -343,7 +343,7 @@ mod tests {
             row_id,
             vec![
                 Value::Int32(id),
-                Value::Varchar(name.to_string()),
+                Value::varchar(name.to_string()),
                 Value::Int32(age),
             ],
         )
@@ -456,7 +456,7 @@ mod tests {
     fn test_choose_index_with_stats() {
         let filters = vec![
             Filter::new("age", Operator::Equals(Value::Int32(25))),
-            Filter::new("city", Operator::Equals(Value::Varchar("Rome".to_string()))),
+            Filter::new("city", Operator::Equals(Value::varchar("Rome".to_string()))),
         ];
 
         let indices = vec!["age".to_string(), "city".to_string()];

@@ -60,7 +60,7 @@ fn test_sql_blog_suite() -> Result<()> {
     execute_sql(&mut db, "UPDATE blog_posts SET col2 = 'Updated First Post' WHERE col0 = 1;")?;
     
     let updated_post = db.get_by_id("blog_posts", 1)?.unwrap();
-    assert_eq!(updated_post.values[2], thunderdb::Value::Varchar("Updated First Post".to_string()));
+    assert_eq!(updated_post.values[2], thunderdb::Value::varchar("Updated First Post".to_string()));
 
     // 6. CRUD: DELETE
     execute_sql(&mut db, "DELETE FROM comments WHERE col0 = 3;")?;

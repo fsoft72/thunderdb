@@ -322,7 +322,7 @@ mod tests {
             columns: None,
             values: vec![
                 Value::Int32(1),
-                Value::Varchar("Alice".to_string()),
+                Value::varchar("Alice".to_string()),
                 Value::Int32(25),
             ],
         };

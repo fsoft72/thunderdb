@@ -89,7 +89,7 @@ fn format_value_display(value: &Value, max_width: usize) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Float32(v) => format!("{:.2}", v),
         Value::Float64(v) => format!("{:.2}", v),
-        Value::Varchar(v) => v.clone(),
+        Value::Varchar(v) => v.as_str().to_string(),
         Value::Timestamp(v) => v.to_string(),
         Value::Null => "NULL".to_string(),
     };
@@ -131,7 +131,7 @@ mod tests {
     fn test_format_single_row() {
         let rows = vec![Row::new(
             1,
-            vec![Value::Int32(1), Value::Varchar("Alice".to_string())],
+            vec![Value::Int32(1), Value::varchar("Alice".to_string())],
         )];
         let columns = vec!["id".to_string(), "name".to_string()];
         let result = format_results(&rows, &columns);
@@ -147,15 +147,15 @@ mod tests {
         let rows = vec![
             Row::new(
                 1,
-                vec![Value::Int32(1), Value::Varchar("Alice".to_string())],
+                vec![Value::Int32(1), Value::varchar("Alice".to_string())],
             ),
             Row::new(
                 2,
-                vec![Value::Int32(2), Value::Varchar("Bob".to_string())],
+                vec![Value::Int32(2), Value::varchar("Bob".to_string())],
             ),
             Row::new(
                 3,
-                vec![Value::Int32(3), Value::Varchar("Charlie".to_string())],
+                vec![Value::Int32(3), Value::varchar("Charlie".to_string())],
             ),
         ];
         let columns = vec!["id".to_string(), "name".to_string()];
@@ -179,11 +179,11 @@ mod tests {
         assert_eq!(format_value_display(&Value::Int32(42), 10), "42");
         assert_eq!(format_value_display(&Value::Null, 10), "NULL");
         assert_eq!(
-            format_value_display(&Value::Varchar("test".to_string()), 10),
+            format_value_display(&Value::varchar("test".to_string()), 10),
             "test"
         );
         assert_eq!(
-            format_value_display(&Value::Varchar("very long string".to_string()), 5),
+            format_value_display(&Value::varchar("very long string".to_string()), 5),
             "ve..."
         );
     }
@@ -199,7 +199,7 @@ mod tests {
     fn test_format_with_null() {
         let rows = vec![Row::new(
             1,
-            vec![Value::Int32(1), Value::Null, Value::Varchar("test".to_string())],
+            vec![Value::Int32(1), Value::Null, Value::varchar("test".to_string())],
         )];
         let columns = vec!["id".to_string(), "middle".to_string(), "name".to_string()];
         let result = format_results(&rows, &columns);

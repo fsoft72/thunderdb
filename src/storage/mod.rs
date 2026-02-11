@@ -12,9 +12,11 @@ pub mod row;
 pub mod rat;
 pub mod data_file;
 pub mod table_engine;
+pub mod small_string;
 
 pub use value::Value;
 pub use row::Row;
 pub use rat::RecordAddressTable;
 pub use data_file::DataFile;
 pub use table_engine::TableEngine;
+pub use small_string::SmallString;

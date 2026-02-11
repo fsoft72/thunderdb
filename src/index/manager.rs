@@ -200,8 +200,8 @@ impl IndexManager {
         use crate::index::LikePattern;
         let pattern = LikePattern::Prefix(prefix.to_string());
         if let Some((start, end)) = pattern.get_range_bounds() {
-            let start_val = Value::Varchar(start);
-            let end_val = Value::Varchar(end);
+            let start_val = Value::varchar(start);
+            let end_val = Value::varchar(end);
             if let Some(index) = self.indices.get(column_name) {
                 let results = index.range_scan(&start_val, &end_val);
                 // Filter out the 'end' boundary which is exclusive for prefix matches
@@ -476,7 +476,7 @@ mod tests {
             row_id,
             vec![
                 Value::Int32(id_val),
-                Value::Varchar(name.to_string()),
+                Value::varchar(name.to_string()),
                 Value::Int32(age),
             ],
         )

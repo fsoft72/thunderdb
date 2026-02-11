@@ -118,7 +118,7 @@ mod tests {
             42,
             vec![
                 Value::Int32(100),
-                Value::Varchar("test".to_string()),
+                Value::varchar("test".to_string()),
                 Value::Null,
             ],
         );
@@ -138,7 +138,7 @@ mod tests {
                 Value::Int64(9223372036854775807),
                 Value::Float32(3.14),
                 Value::Float64(2.718281828),
-                Value::Varchar("Hello, World!".to_string()),
+                Value::varchar("Hello, World!".to_string()),
                 Value::Timestamp(1609459200000),
                 Value::Null,
             ],
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_row_large_varchar() {
         let large_string = "x".repeat(10000);
-        let row = Row::new(99, vec![Value::Varchar(large_string.clone())]);
+        let row = Row::new(99, vec![Value::varchar(large_string.clone())]);
 
         let bytes = row.to_bytes();
         let decoded = Row::from_bytes(&bytes).unwrap();
@@ -181,11 +181,11 @@ mod tests {
     fn test_row_get() {
         let row = Row::new(
             1,
-            vec![Value::Int32(10), Value::Varchar("test".to_string())],
+            vec![Value::Int32(10), Value::varchar("test".to_string())],
         );
 
         assert_eq!(row.get(0), Some(&Value::Int32(10)));
-        assert_eq!(row.get(1), Some(&Value::Varchar("test".to_string())));
+        assert_eq!(row.get(1), Some(&Value::varchar("test".to_string())));
         assert_eq!(row.get(2), None);
     }
 
@@ -226,7 +226,7 @@ mod tests {
                 i,
                 vec![
                     Value::Int64(i as i64),
-                    Value::Varchar(format!("row_{}", i)),
+                    Value::varchar(format!("row_{}", i)),
                     Value::Float64(i as f64 * 1.5),
                 ],
             );

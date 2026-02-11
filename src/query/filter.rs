@@ -269,9 +269,9 @@ mod tests {
     fn test_like_operator() {
         let op = Operator::Like("test%".to_string());
 
-        assert!(op.matches(&Value::Varchar("test".to_string())));
-        assert!(op.matches(&Value::Varchar("testing".to_string())));
-        assert!(!op.matches(&Value::Varchar("best".to_string())));
+        assert!(op.matches(&Value::varchar("test".to_string())));
+        assert!(op.matches(&Value::varchar("testing".to_string())));
+        assert!(!op.matches(&Value::varchar("best".to_string())));
         assert!(!op.matches(&Value::Int32(42)));
     }
 
@@ -279,8 +279,8 @@ mod tests {
     fn test_not_like_operator() {
         let op = Operator::NotLike("test%".to_string());
 
-        assert!(!op.matches(&Value::Varchar("test".to_string())));
-        assert!(op.matches(&Value::Varchar("best".to_string())));
+        assert!(!op.matches(&Value::varchar("test".to_string())));
+        assert!(op.matches(&Value::varchar("best".to_string())));
     }
 
     #[test]
@@ -335,10 +335,10 @@ mod tests {
 
     #[test]
     fn test_varchar_comparisons() {
-        let op = Operator::GreaterThan(Value::Varchar("banana".to_string()));
+        let op = Operator::GreaterThan(Value::varchar("banana".to_string()));
 
-        assert!(op.matches(&Value::Varchar("cherry".to_string())));
-        assert!(!op.matches(&Value::Varchar("apple".to_string())));
+        assert!(op.matches(&Value::varchar("cherry".to_string())));
+        assert!(!op.matches(&Value::varchar("apple".to_string())));
     }
 
     #[test]

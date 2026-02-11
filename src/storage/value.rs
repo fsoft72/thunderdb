@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::storage::small_string::SmallString;
 use std::fmt;
 
 /// Supported data types in ThunderDB
@@ -14,8 +15,8 @@ pub enum Value {
     Float32(f32),
     /// 64-bit floating point
     Float64(f64),
-    /// Variable-length string (UTF-8)
-    Varchar(String),
+    /// Variable-length string (UTF-8), inline for <= 23 bytes
+    Varchar(SmallString),
     /// Unix timestamp (milliseconds since epoch)
     Timestamp(i64),
     /// Null value
@@ -188,7 +189,7 @@ impl Value {
                 }
 
                 let str_bytes = &bytes[5..5 + len];
-                let s = String::from_utf8(str_bytes.to_vec())
+                let s = SmallString::from_utf8(str_bytes)
                     .map_err(|e| Error::Serialization(format!("Invalid UTF-8: {}", e)))?;
                 consumed += len;
                 Value::Varchar(s)
@@ -227,6 +228,11 @@ impl Value {
     /// Check if value is null
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    /// Convenience constructor for Varchar values
+    pub fn varchar(s: impl Into<SmallString>) -> Self {
+        Value::Varchar(s.into())
     }
 }
 
@@ -286,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_varchar_serialization() {
-        let val = Value::Varchar("Hello, ThunderDB!".to_string());
+        let val = Value::varchar("Hello, ThunderDB!".to_string());
         let bytes = val.to_bytes();
         let (decoded, consumed) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(val, decoded);
@@ -295,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_varchar_empty() {
-        let val = Value::Varchar(String::new());
+        let val = Value::varchar(String::new());
         let bytes = val.to_bytes();
         let (decoded, consumed) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(val, decoded);
@@ -304,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_varchar_unicode() {
-        let val = Value::Varchar("こんにちは世界 🌍".to_string());
+        let val = Value::varchar("こんにちは世界 🌍".to_string());
         let bytes = val.to_bytes();
         let (decoded, consumed) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(val, decoded);
@@ -337,7 +343,7 @@ mod tests {
             Value::Int64(123456789),
             Value::Float32(1.5),
             Value::Float64(-2.5),
-            Value::Varchar("test".to_string()),
+            Value::varchar("test".to_string()),
             Value::Timestamp(0),
             Value::Null,
         ];
@@ -356,7 +362,7 @@ mod tests {
         assert_eq!(Value::Int64(1).type_name(), "INT64");
         assert_eq!(Value::Float32(1.0).type_name(), "FLOAT32");
         assert_eq!(Value::Float64(1.0).type_name(), "FLOAT64");
-        assert_eq!(Value::Varchar("x".to_string()).type_name(), "VARCHAR");
+        assert_eq!(Value::varchar("x".to_string()).type_name(), "VARCHAR");
         assert_eq!(Value::Timestamp(0).type_name(), "TIMESTAMP");
         assert_eq!(Value::Null.type_name(), "NULL");
     }

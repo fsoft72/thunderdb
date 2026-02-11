@@ -22,7 +22,7 @@ fn test_schema_enforcement_behavior() {
     let result = db.insert_row(table_name, vec![Value::Int32(1)]); 
     assert!(result.is_ok(), "Expected it to succeed because schema is not enforced yet");
     
-    let result = db.insert_row(table_name, vec![Value::Int32(2), Value::Varchar("Alice".to_string()), Value::Int32(100)]);
+    let result = db.insert_row(table_name, vec![Value::Int32(2), Value::varchar("Alice".to_string()), Value::Int32(100)]);
     assert!(result.is_ok(), "Expected it to succeed even with extra columns");
     
     fs::remove_dir_all(data_dir).ok();

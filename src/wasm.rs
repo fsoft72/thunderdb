@@ -43,7 +43,7 @@ impl ThunderDBWasm {
                     if let Some(end_idx) = sql.rfind(')') {
                         let val_str = &sql[start_idx+1..end_idx];
                         let vals: Vec<Value> = val_str.split(',')
-                            .map(|v| Value::Varchar(v.trim().trim_matches('\'').to_string()))
+                            .map(|v| Value::varchar(v.trim().trim_matches('\'').to_string()))
                             .collect();
                         
                         match self.db.insert_row(table_name, vals) {

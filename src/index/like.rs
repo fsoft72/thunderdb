@@ -80,7 +80,7 @@ impl LikePattern {
     /// true if value matches the pattern
     pub fn matches(&self, value: &Value) -> bool {
         match value {
-            Value::Varchar(s) => self.matches_string(s),
+            Value::Varchar(s) => self.matches_string(s.as_str()),
             _ => false, // LIKE only applies to strings
         }
     }
@@ -245,70 +245,70 @@ mod tests {
     fn test_match_exact() {
         let pattern = LikePattern::parse("hello").unwrap();
 
-        assert!(pattern.matches(&Value::Varchar("hello".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("hello world".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("goodbye".to_string())));
+        assert!(pattern.matches(&Value::varchar("hello".to_string())));
+        assert!(!pattern.matches(&Value::varchar("hello world".to_string())));
+        assert!(!pattern.matches(&Value::varchar("goodbye".to_string())));
     }
 
     #[test]
     fn test_match_prefix() {
         let pattern = LikePattern::parse("hello%").unwrap();
 
-        assert!(pattern.matches(&Value::Varchar("hello".to_string())));
-        assert!(pattern.matches(&Value::Varchar("hello world".to_string())));
-        assert!(pattern.matches(&Value::Varchar("hello123".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("hi hello".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("goodbye".to_string())));
+        assert!(pattern.matches(&Value::varchar("hello".to_string())));
+        assert!(pattern.matches(&Value::varchar("hello world".to_string())));
+        assert!(pattern.matches(&Value::varchar("hello123".to_string())));
+        assert!(!pattern.matches(&Value::varchar("hi hello".to_string())));
+        assert!(!pattern.matches(&Value::varchar("goodbye".to_string())));
     }
 
     #[test]
     fn test_match_suffix() {
         let pattern = LikePattern::parse("%world").unwrap();
 
-        assert!(pattern.matches(&Value::Varchar("world".to_string())));
-        assert!(pattern.matches(&Value::Varchar("hello world".to_string())));
-        assert!(pattern.matches(&Value::Varchar("my world".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("world!".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("goodbye".to_string())));
+        assert!(pattern.matches(&Value::varchar("world".to_string())));
+        assert!(pattern.matches(&Value::varchar("hello world".to_string())));
+        assert!(pattern.matches(&Value::varchar("my world".to_string())));
+        assert!(!pattern.matches(&Value::varchar("world!".to_string())));
+        assert!(!pattern.matches(&Value::varchar("goodbye".to_string())));
     }
 
     #[test]
     fn test_match_contains() {
         let pattern = LikePattern::parse("%test%").unwrap();
 
-        assert!(pattern.matches(&Value::Varchar("test".to_string())));
-        assert!(pattern.matches(&Value::Varchar("this is a test".to_string())));
-        assert!(pattern.matches(&Value::Varchar("testing 123".to_string())));
-        assert!(pattern.matches(&Value::Varchar("contest".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("hello world".to_string())));
+        assert!(pattern.matches(&Value::varchar("test".to_string())));
+        assert!(pattern.matches(&Value::varchar("this is a test".to_string())));
+        assert!(pattern.matches(&Value::varchar("testing 123".to_string())));
+        assert!(pattern.matches(&Value::varchar("contest".to_string())));
+        assert!(!pattern.matches(&Value::varchar("hello world".to_string())));
     }
 
     #[test]
     fn test_match_underscore() {
         let pattern = LikePattern::parse("h_llo").unwrap();
 
-        assert!(pattern.matches(&Value::Varchar("hello".to_string())));
-        assert!(pattern.matches(&Value::Varchar("hallo".to_string())));
-        assert!(pattern.matches(&Value::Varchar("hxllo".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("hllo".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("heello".to_string())));
+        assert!(pattern.matches(&Value::varchar("hello".to_string())));
+        assert!(pattern.matches(&Value::varchar("hallo".to_string())));
+        assert!(pattern.matches(&Value::varchar("hxllo".to_string())));
+        assert!(!pattern.matches(&Value::varchar("hllo".to_string())));
+        assert!(!pattern.matches(&Value::varchar("heello".to_string())));
     }
 
     #[test]
     fn test_match_complex() {
         let pattern = LikePattern::parse("a%b%c").unwrap();
 
-        assert!(pattern.matches(&Value::Varchar("abc".to_string())));
-        assert!(pattern.matches(&Value::Varchar("aXbYc".to_string())));
-        assert!(pattern.matches(&Value::Varchar("aXXXbYYYc".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("ab".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("bc".to_string())));
+        assert!(pattern.matches(&Value::varchar("abc".to_string())));
+        assert!(pattern.matches(&Value::varchar("aXbYc".to_string())));
+        assert!(pattern.matches(&Value::varchar("aXXXbYYYc".to_string())));
+        assert!(!pattern.matches(&Value::varchar("ab".to_string())));
+        assert!(!pattern.matches(&Value::varchar("bc".to_string())));
 
         let pattern = LikePattern::parse("_a_").unwrap();
-        assert!(pattern.matches(&Value::Varchar("xay".to_string())));
-        assert!(pattern.matches(&Value::Varchar("bac".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("ay".to_string())));
-        assert!(!pattern.matches(&Value::Varchar("xayz".to_string())));
+        assert!(pattern.matches(&Value::varchar("xay".to_string())));
+        assert!(pattern.matches(&Value::varchar("bac".to_string())));
+        assert!(!pattern.matches(&Value::varchar("ay".to_string())));
+        assert!(!pattern.matches(&Value::varchar("xayz".to_string())));
     }
 
     #[test]
@@ -359,16 +359,16 @@ mod tests {
     fn test_empty_pattern() {
         let pattern = LikePattern::parse("").unwrap();
         assert_eq!(pattern, LikePattern::Exact(String::new()));
-        assert!(pattern.matches(&Value::Varchar(String::new())));
+        assert!(pattern.matches(&Value::varchar(String::new())));
     }
 
     #[test]
     fn test_edge_cases() {
         let pattern = LikePattern::parse("%").unwrap();
-        assert!(pattern.matches(&Value::Varchar("anything".to_string())));
-        assert!(pattern.matches(&Value::Varchar("".to_string())));
+        assert!(pattern.matches(&Value::varchar("anything".to_string())));
+        assert!(pattern.matches(&Value::varchar("".to_string())));
 
         let pattern = LikePattern::parse("%%").unwrap();
-        assert!(pattern.matches(&Value::Varchar("anything".to_string())));
+        assert!(pattern.matches(&Value::varchar("anything".to_string())));
     }
 }

@@ -422,7 +422,7 @@ mod tests {
             1,
             vec![
                 Value::Int32(100),
-                Value::Varchar("Alice".to_string()),
+                Value::varchar("Alice".to_string()),
                 Value::Int32(25),
             ],
         )];
@@ -431,7 +431,7 @@ mod tests {
 
         assert_eq!(result[0].values.len(), 2);
         assert_eq!(result[0].values[0], Value::Int32(100));
-        assert_eq!(result[0].values[1], Value::Varchar("Alice".to_string()));
+        assert_eq!(result[0].values[1], Value::varchar("Alice".to_string()));
     }
 
     #[test]

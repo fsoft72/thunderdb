@@ -553,7 +553,7 @@ impl Parser {
             Token::String(s) => {
                 let string = s.clone();
                 self.advance();
-                Ok(Expression::Literal(Value::Varchar(string)))
+                Ok(Expression::Literal(Value::varchar(string)))
             }
             Token::Identifier(name) => {
                 let identifier = name.clone();
@@ -592,7 +592,7 @@ impl Parser {
             Token::String(s) => {
                 let string = s.clone();
                 self.advance();
-                Ok(Value::Varchar(string))
+                Ok(Value::varchar(string))
             }
             Token::Null => {
                 self.advance();

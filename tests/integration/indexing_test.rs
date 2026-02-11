@@ -104,13 +104,13 @@ fn test_multiple_filters_with_index() {
     }).unwrap();
     table.index_manager_mut().create_index("dept").unwrap();
     
-    db.insert_row(table_name, vec![Value::Int32(1), Value::Varchar("IT".to_string()), Value::Int32(5000)]).unwrap();
-    db.insert_row(table_name, vec![Value::Int32(2), Value::Varchar("IT".to_string()), Value::Int32(6000)]).unwrap();
-    db.insert_row(table_name, vec![Value::Int32(3), Value::Varchar("HR".to_string()), Value::Int32(5500)]).unwrap();
+    db.insert_row(table_name, vec![Value::Int32(1), Value::varchar("IT".to_string()), Value::Int32(5000)]).unwrap();
+    db.insert_row(table_name, vec![Value::Int32(2), Value::varchar("IT".to_string()), Value::Int32(6000)]).unwrap();
+    db.insert_row(table_name, vec![Value::Int32(3), Value::varchar("HR".to_string()), Value::Int32(5500)]).unwrap();
     
     // Combined filter: dept='IT' (indexed) AND salary > 5500 (not indexed)
     let results = db.scan(table_name, vec![
-        Filter::new("dept", Operator::Equals(Value::Varchar("IT".to_string()))),
+        Filter::new("dept", Operator::Equals(Value::varchar("IT".to_string()))),
         Filter::new("salary", Operator::GreaterThan(Value::Int32(5500)))
     ]).unwrap();
     
@@ -132,25 +132,25 @@ fn test_index_with_updates_and_deletes() {
     }).unwrap();
     table.index_manager_mut().create_index("status").unwrap();
     
-    db.insert_row(table_name, vec![Value::Int32(1), Value::Varchar("todo".to_string())]).unwrap();
-    db.insert_row(table_name, vec![Value::Int32(2), Value::Varchar("todo".to_string())]).unwrap();
+    db.insert_row(table_name, vec![Value::Int32(1), Value::varchar("todo".to_string())]).unwrap();
+    db.insert_row(table_name, vec![Value::Int32(2), Value::varchar("todo".to_string())]).unwrap();
     
     // Verify initial state
-    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::Varchar("todo".to_string())))]).unwrap(), 2);
+    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::varchar("todo".to_string())))]).unwrap(), 2);
     
     // Update row 1 to 'done'
     db.update(table_name, 
         vec![Filter::new("id", Operator::Equals(Value::Int32(1)))],
-        vec![("status".to_string(), Value::Varchar("done".to_string()))]
+        vec![("status".to_string(), Value::varchar("done".to_string()))]
     ).unwrap();
     
     // Verify index reflected update
-    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::Varchar("todo".to_string())))]).unwrap(), 1);
-    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::Varchar("done".to_string())))]).unwrap(), 1);
+    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::varchar("todo".to_string())))]).unwrap(), 1);
+    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::varchar("done".to_string())))]).unwrap(), 1);
     
     // Delete row 2
     db.delete(table_name, vec![Filter::new("id", Operator::Equals(Value::Int32(2)))]).unwrap();
     
     // Verify index reflected deletion
-    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::Varchar("todo".to_string())))]).unwrap(), 0);
+    assert_eq!(db.count(table_name, vec![Filter::new("status", Operator::Equals(Value::varchar("todo".to_string())))]).unwrap(), 0);
 }

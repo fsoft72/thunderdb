@@ -764,7 +764,7 @@ mod tests {
 
         let values = vec![
             Value::Int32(42),
-            Value::Varchar("Alice".to_string()),
+            Value::varchar("Alice".to_string()),
             Value::Float64(3.14),
         ];
 
@@ -781,13 +781,13 @@ mod tests {
         let mut table = create_test_table("test_insert_multiple");
 
         let row_id1 = table
-            .insert_row(vec![Value::Int32(1), Value::Varchar("A".to_string())])
+            .insert_row(vec![Value::Int32(1), Value::varchar("A".to_string())])
             .unwrap();
         let row_id2 = table
-            .insert_row(vec![Value::Int32(2), Value::Varchar("B".to_string())])
+            .insert_row(vec![Value::Int32(2), Value::varchar("B".to_string())])
             .unwrap();
         let row_id3 = table
-            .insert_row(vec![Value::Int32(3), Value::Varchar("C".to_string())])
+            .insert_row(vec![Value::Int32(3), Value::varchar("C".to_string())])
             .unwrap();
 
         assert_eq!(row_id1, 1);
@@ -802,9 +802,9 @@ mod tests {
         let mut table = create_test_table("test_batch");
 
         let rows = vec![
-            vec![Value::Int32(1), Value::Varchar("A".to_string())],
-            vec![Value::Int32(2), Value::Varchar("B".to_string())],
-            vec![Value::Int32(3), Value::Varchar("C".to_string())],
+            vec![Value::Int32(1), Value::varchar("A".to_string())],
+            vec![Value::Int32(2), Value::varchar("B".to_string())],
+            vec![Value::Int32(3), Value::varchar("C".to_string())],
         ];
 
         let row_ids = table.insert_batch(rows).unwrap();
@@ -838,7 +838,7 @@ mod tests {
 
         for i in 1..=10 {
             table
-                .insert_row(vec![Value::Int32(i), Value::Varchar(format!("row_{}", i))])
+                .insert_row(vec![Value::Int32(i), Value::varchar(format!("row_{}", i))])
                 .unwrap();
         }
 
@@ -877,7 +877,7 @@ mod tests {
                 table
                     .insert_row(vec![
                         Value::Int64(i),
-                        Value::Varchar(format!("user_{}", i)),
+                        Value::varchar(format!("user_{}", i)),
                     ])
                     .unwrap();
             }
@@ -1014,7 +1014,7 @@ mod tests {
         let mut table = create_test_table("test_full_compact");
 
         for i in 1..=10 {
-            table.insert_row(vec![Value::Int32(i), Value::Varchar(format!("row_{}", i))]).unwrap();
+            table.insert_row(vec![Value::Int32(i), Value::varchar(format!("row_{}", i))]).unwrap();
         }
 
         // Delete half the rows
@@ -1138,7 +1138,7 @@ mod tests {
         table.index_manager_mut().create_index("id").unwrap();
 
         for i in 1..=10 {
-            table.insert_row(vec![Value::Int32(i), Value::Varchar(format!("n{}", i))]).unwrap();
+            table.insert_row(vec![Value::Int32(i), Value::varchar(format!("n{}", i))]).unwrap();
         }
 
         // Rebuild index after inserts since insert_row doesn't auto-index without mapping

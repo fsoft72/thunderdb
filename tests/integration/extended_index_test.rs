@@ -24,7 +24,7 @@ fn test_index_extended_operators() {
     table.index_manager_mut().create_index("name").unwrap();
     
     for i in 1..=10 {
-        db.insert_row(table_name, vec![Value::Int32(i), Value::Varchar(format!("item_{:02}", i))]).unwrap();
+        db.insert_row(table_name, vec![Value::Int32(i), Value::varchar(format!("item_{:02}", i))]).unwrap();
     }
     
     // Test GreaterThan
@@ -43,7 +43,7 @@ fn test_index_extended_operators() {
     assert_eq!(results.len(), 1); // item_10
 
     // Test NULL values in index
-    db.insert_row(table_name, vec![Value::Null, Value::Varchar("null_val".to_string())]).unwrap();
+    db.insert_row(table_name, vec![Value::Null, Value::varchar("null_val".to_string())]).unwrap();
     let results = db.scan(table_name, vec![Filter::new("val", Operator::IsNull)]).unwrap();
     // Note: IsNull does not use index currently based on choose_index
     assert_eq!(results.len(), 1);

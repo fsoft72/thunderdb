@@ -272,16 +272,16 @@ mod tests {
     fn test_varchar_index_stats() {
         let mut tree = BTree::new(5).unwrap();
 
-        tree.insert(Value::Varchar("alice".to_string()), 1).unwrap();
-        tree.insert(Value::Varchar("bob".to_string()), 2).unwrap();
-        tree.insert(Value::Varchar("charlie".to_string()), 3).unwrap();
+        tree.insert(Value::varchar("alice".to_string()), 1).unwrap();
+        tree.insert(Value::varchar("bob".to_string()), 2).unwrap();
+        tree.insert(Value::varchar("charlie".to_string()), 3).unwrap();
 
         let stats = IndexStatistics::from_btree(&tree);
 
         assert_eq!(stats.cardinality, 3);
         assert_eq!(stats.total_entries, 3);
-        assert_eq!(stats.min_value, Some(Value::Varchar("alice".to_string())));
-        assert_eq!(stats.max_value, Some(Value::Varchar("charlie".to_string())));
+        assert_eq!(stats.min_value, Some(Value::varchar("alice".to_string())));
+        assert_eq!(stats.max_value, Some(Value::varchar("charlie".to_string())));
     }
 
     #[test]

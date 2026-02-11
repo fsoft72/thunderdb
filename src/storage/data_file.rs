@@ -506,7 +506,7 @@ mod tests {
             row_id,
             vec![
                 Value::Int64(row_id as i64),
-                Value::Varchar(format!("row_{}", row_id)),
+                Value::varchar(format!("row_{}", row_id)),
                 Value::Float64(row_id as f64 * 1.5),
             ],
         )
@@ -686,7 +686,7 @@ mod tests {
 
         // Create a row with large varchar
         let large_string = "x".repeat(100_000);
-        let row = Row::new(1, vec![Value::Varchar(large_string.clone())]);
+        let row = Row::new(1, vec![Value::varchar(large_string.clone())]);
 
         let (offset, length) = df.append_row(&row).unwrap();
         assert!(length > 100_000);
