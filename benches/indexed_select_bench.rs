@@ -25,7 +25,7 @@ fn setup_indexed_db(name: &str, row_count: usize) -> Database {
     for i in 0..row_count {
         batch.push(vec![
             Value::Int32(i as i32),
-            Value::Varchar(format!("User {}", i)),
+            Value::varchar(format!("User {}", i)),
             Value::Int32((i % 100) as i32) // Age between 0-99
         ]);
         

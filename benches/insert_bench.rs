@@ -20,7 +20,7 @@ fn benchmark_inserts(c: &mut Criterion) {
             count += 1;
             db.insert_row("bench_table", vec![
                 Value::Int32(count),
-                Value::Varchar("Benchmarking is fun".to_string()),
+                Value::varchar("Benchmarking is fun"),
                 Value::Float64(3.14)
             ]).unwrap();
         });
@@ -35,7 +35,7 @@ fn benchmark_inserts(c: &mut Criterion) {
             for i in 0..100 {
                 batch.push(vec![
                     Value::Int32(count * 100 + i),
-                    Value::Varchar(format!("Row {}", i)),
+                    Value::varchar(format!("Row {}", i)),
                     Value::Float64(i as f64)
                 ]);
             }
