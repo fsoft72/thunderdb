@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::index::btree::BTree;
 use crate::index::node::{BTreeNode, NodeType};
 use crate::storage::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -241,11 +241,11 @@ fn load_index_v2(file: &mut File) -> Result<BTree<Value, u64>> {
     BTree::from_parts(order, root_id, first_leaf_id, entry_count, nodes)
 }
 
-/// Write a Value to the file (length-prefixed)
+/// Write a Value to the file (length-prefixed, zero-alloc via write_to)
 fn write_value(file: &mut File, value: &Value) -> Result<()> {
-    let bytes = value.to_bytes();
-    file.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    file.write_all(&bytes)?;
+    let size = value.serialized_size() as u32;
+    file.write_all(&size.to_le_bytes())?;
+    value.write_to(file)?;
     Ok(())
 }
 
@@ -292,17 +292,19 @@ fn read_optional_u64(file: &mut File) -> Result<Option<u64>> {
     }
 }
 
-/// LRU cache for B-Tree nodes
+/// LRU cache for B-Tree nodes using a generation counter for O(1) access
 ///
-/// Keeps frequently accessed nodes in memory to avoid disk I/O
+/// Each entry stores a generation counter. On access/insert, the global
+/// generation is incremented and assigned. On eviction, the entry with
+/// the lowest generation is removed.
 pub struct NodeCache<K, V>
 where
     K: Clone + PartialOrd + std::fmt::Debug,
     V: Clone + std::fmt::Debug,
 {
-    cache: HashMap<u64, BTreeNode<K, V>>,
-    lru_list: VecDeque<u64>,
+    cache: HashMap<u64, (BTreeNode<K, V>, u64)>,
     capacity: usize,
+    generation: u64,
 }
 
 impl<K, V> NodeCache<K, V>
@@ -314,44 +316,40 @@ where
     pub fn new(capacity: usize) -> Self {
         Self {
             cache: HashMap::new(),
-            lru_list: VecDeque::new(),
             capacity,
+            generation: 0,
         }
     }
 
-    /// Get a node from cache
+    /// Get a node from cache (O(1))
     ///
-    /// Returns Some(node) if found, updates LRU order
+    /// Returns Some(node) if found, updates generation for LRU tracking
     pub fn get(&mut self, node_id: u64) -> Option<&BTreeNode<K, V>> {
         if self.cache.contains_key(&node_id) {
-            // Update LRU - move to back
-            self.lru_list.retain(|&id| id != node_id);
-            self.lru_list.push_back(node_id);
-            self.cache.get(&node_id)
+            self.generation += 1;
+            let entry = self.cache.get_mut(&node_id).unwrap();
+            entry.1 = self.generation;
+            Some(&entry.0)
         } else {
             None
         }
     }
 
-    /// Insert a node into cache
+    /// Insert a node into cache (O(n) only on eviction, O(1) amortized)
     ///
-    /// Evicts least recently used node if at capacity
+    /// Evicts least recently used node (lowest generation) if at capacity
     pub fn insert(&mut self, node_id: u64, node: BTreeNode<K, V>) {
-        // If already exists, remove from LRU list
-        if self.cache.contains_key(&node_id) {
-            self.lru_list.retain(|&id| id != node_id);
-        }
+        self.generation += 1;
 
         // Check if we need to evict
         if self.cache.len() >= self.capacity && !self.cache.contains_key(&node_id) {
-            if let Some(evict_id) = self.lru_list.pop_front() {
+            // Find entry with lowest generation
+            if let Some((&evict_id, _)) = self.cache.iter().min_by_key(|(_, (_, gen))| *gen) {
                 self.cache.remove(&evict_id);
             }
         }
 
-        // Insert node
-        self.cache.insert(node_id, node);
-        self.lru_list.push_back(node_id);
+        self.cache.insert(node_id, (node, self.generation));
     }
 
     /// Get cache statistics
@@ -359,14 +357,14 @@ where
         CacheStats {
             size: self.cache.len(),
             capacity: self.capacity,
-            hit_rate: 0.0, // Would need hit/miss tracking
+            hit_rate: 0.0,
         }
     }
 
     /// Clear the cache
     pub fn clear(&mut self) {
         self.cache.clear();
-        self.lru_list.clear();
+        self.generation = 0;
     }
 }
 

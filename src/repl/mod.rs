@@ -338,7 +338,7 @@ impl<'a> Repl<'a> {
     }
 
     /// Show tables list
-    pub fn show_tables(&self) {
+    pub fn show_tables(&mut self) {
         let tables = self.database.list_tables();
         if tables.is_empty() {
             println!("No tables found");

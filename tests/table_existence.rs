@@ -50,8 +50,8 @@ fn test_select_from_non_existent_table_errors() -> Result<()> {
     
             {
     
-                let db = Database::open(temp_dir)?;
-    
+                let mut db = Database::open(temp_dir)?;
+
                 let tables = db.list_tables();
     
                 assert!(tables.contains(&"table1".to_string()));

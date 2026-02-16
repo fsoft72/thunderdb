@@ -133,6 +133,46 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Insert multiple rows into all relevant indices
+    ///
+    /// Batches entries per column, sorts them, and inserts in sorted order
+    /// for better B-Tree cache locality.
+    pub fn insert_rows_batch(
+        &mut self,
+        rows: &[Row],
+        column_mapping: &HashMap<String, usize>,
+    ) -> Result<()> {
+        for column_name in &self.indexed_columns {
+            if let Some(&col_idx) = column_mapping.get(column_name) {
+                // Collect all (value, row_id) pairs for this column
+                let mut entries: Vec<(Value, u64)> = Vec::with_capacity(rows.len());
+                for row in rows {
+                    if let Some(value) = row.values.get(col_idx) {
+                        entries.push((value.clone(), row.row_id));
+                    }
+                }
+
+                // Sort by key for better B-Tree insertion locality
+                entries.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                if let Some(index) = self.indices.get_mut(column_name) {
+                    for (value, row_id) in &entries {
+                        index.insert(value.clone(), *row_id)?;
+                    }
+                }
+
+                if let Some(stats) = self.stats_cache.get_mut(column_name) {
+                    for (value, _) in &entries {
+                        stats.record_insert(value);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Remove a row from all indices
     ///
     /// For each indexed column, extracts the value from the row's values

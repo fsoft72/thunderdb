@@ -66,3 +66,11 @@ path = "tests/integration/extended_index_test.rs"
 [[test]]
 name = "schema_test"
 path = "tests/integration/schema_test.rs"
+
+[[test]]
+name = "stress_1m"
+path = "tests/stress_1m.rs"
+
+[[bench]]
+name = "stress_bench"
+harness = false

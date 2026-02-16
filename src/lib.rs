@@ -42,6 +42,8 @@ pub struct Database {
     data_dir: PathBuf,
     tables: HashMap<String, TableEngine>,
     statement_cache: PreparedCache,
+    /// Cached table names, invalidated on create/drop
+    table_names_cache: Option<Vec<String>>,
 }
 
 impl Database {
@@ -83,6 +85,7 @@ impl Database {
             data_dir: data_dir.to_path_buf(),
             tables: HashMap::new(),
             statement_cache: PreparedCache::default(),
+            table_names_cache: None,
         })
     }
 
@@ -97,6 +100,7 @@ impl Database {
             data_dir: PathBuf::from(":memory:"),
             tables: HashMap::new(),
             statement_cache: PreparedCache::default(),
+            table_names_cache: None,
         })
     }
 
@@ -110,38 +114,42 @@ impl Database {
         &mut self.config
     }
 
-    /// Get a table, loading it if necessary. Fails if table doesn't exist.
-    pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableEngine> {
+    /// Load or create a table depending on the `create_if_missing` flag.
+    ///
+    /// When `create_if_missing` is false, returns Error::TableNotFound if the
+    /// table doesn't exist. When true, creates it on the fly.
+    fn load_table(&mut self, name: &str, create_if_missing: bool) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
             let table = if self.config.storage.in_memory {
                 TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
-                { TableEngine::open(name, &self.data_dir, self.config.storage.clone())? }
+                {
+                    if create_if_missing {
+                        TableEngine::create(name, &self.data_dir, self.config.storage.clone())?
+                    } else {
+                        TableEngine::open(name, &self.data_dir, self.config.storage.clone())?
+                    }
+                }
                 #[cfg(target_arch = "wasm32")]
                 { TableEngine::open_in_memory(name, self.config.storage.clone())? }
             };
-            
             self.tables.insert(name.to_string(), table);
         }
         Ok(self.tables.get_mut(name).unwrap())
     }
 
+    /// Get a table, loading it if necessary. Fails if table doesn't exist.
+    pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableEngine> {
+        self.load_table(name, false)
+    }
+
     /// Create or get a table.
     pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
-            let table = if self.config.storage.in_memory {
-                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                { TableEngine::create(name, &self.data_dir, self.config.storage.clone())? }
-                #[cfg(target_arch = "wasm32")]
-                { TableEngine::open_in_memory(name, self.config.storage.clone())? }
-            };
-
-            self.tables.insert(name.to_string(), table);
+            self.table_names_cache = None; // Invalidate on potential creation
         }
-        Ok(self.tables.get_mut(name).unwrap())
+        self.load_table(name, true)
     }
 
     /// Get a table (read-only)
@@ -149,8 +157,12 @@ impl Database {
         self.tables.get(name)
     }
 
-    /// List all table names
-    pub fn list_tables(&self) -> Vec<String> {
+    /// List all table names (cached, invalidated on create/drop)
+    pub fn list_tables(&mut self) -> Vec<String> {
+        if let Some(ref cached) = self.table_names_cache {
+            return cached.clone();
+        }
+
         let mut table_names = std::collections::HashSet::new();
 
         // Add already loaded tables
@@ -181,10 +193,14 @@ impl Database {
 
         let mut result: Vec<String> = table_names.into_iter().collect();
         result.sort();
+        self.table_names_cache = Some(result.clone());
         result
     }
 
     /// Save the database to disk (if it has a disk path)
+    ///
+    /// Only saves tables that are already loaded — avoids loading unmodified
+    /// on-disk tables just to re-save them.
     pub fn save(&mut self) -> Result<()> {
         if self.data_dir.to_string_lossy() == ":memory:" {
             return Err(Error::Config("Cannot save a purely in-memory database without a data directory. Use open(path) with --memory instead.".to_string()));
@@ -201,18 +217,10 @@ impl Database {
             let config_path = self.data_dir.join("config.json");
             save_config(&self.config, &config_path)?;
 
-            let all_tables = self.list_tables();
+            // Only save tables that are already loaded in memory
             let base_dir = self.data_dir.clone();
-            for table_name in all_tables {
-                if ! self.tables.contains_key(&table_name) {
-                    // Load and save (effectively a no-op if it was already on disk, 
-                    // but ensures it's consistent if we changed something)
-                    let table = self.get_table_mut(&table_name)?;
-                    table.save_to_disk(&base_dir)?;
-                } else {
-                    let table = self.tables.get_mut(&table_name).unwrap();
-                    table.save_to_disk(&base_dir)?;
-                }
+            for table in self.tables.values_mut() {
+                table.save_to_disk(&base_dir)?;
             }
         }
 
@@ -238,6 +246,7 @@ impl Database {
     pub fn drop_table(&mut self, name: &str) -> Result<()> {
         // Remove from memory
         let removed = self.tables.remove(name).is_some();
+        self.table_names_cache = None; // Invalidate cache
 
         // Remove from disk
         #[cfg(not(target_arch = "wasm32"))]
@@ -297,7 +306,7 @@ impl DirectDataAccess for Database {
         let table_engine = self.get_table_mut(table)?;
 
         // Build column mapping from schema if available
-        let mut column_mapping = std::collections::HashMap::new();
+        let mut column_mapping = HashMap::new();
         if let Some(schema) = table_engine.schema() {
             for (i, col) in schema.columns.iter().enumerate() {
                 column_mapping.insert(col.name.clone(), i);
@@ -346,7 +355,13 @@ impl DirectDataAccess for Database {
                     _ => table_engine.scan_all()?,
                 }
             } else {
-                table_engine.scan_all()?
+                // No index: push limit into scan when no filters need post-processing
+                if filters.is_empty() {
+                    let scan_limit = limit.map(|l| l + offset.unwrap_or(0));
+                    table_engine.scan_all_limited(scan_limit)?
+                } else {
+                    table_engine.scan_all()?
+                }
             };
             (source, filters)
         };
@@ -380,65 +395,72 @@ impl DirectDataAccess for Database {
         filters: Vec<Filter>,
         updates: Vec<(String, Value)>,
     ) -> Result<usize> {
-        // Get rows to update
-        let rows = self.scan(table, filters)?;
-        let count = rows.len();
+        // Collect matching row_ids in a single scan pass
+        let row_ids: Vec<u64> = self.scan(table, filters)?
+            .into_iter()
+            .map(|r| r.row_id)
+            .collect();
 
-        if count == 0 {
+        if row_ids.is_empty() {
             return Ok(0);
         }
 
         let table_engine = self.get_table_mut(table)?;
-        
-        // Build column mapping from schema if available
-        let mut column_mapping = std::collections::HashMap::new();
-        if let Some(schema) = table_engine.schema() {
-            for (i, col) in schema.columns.iter().enumerate() {
-                column_mapping.insert(col.name.clone(), i);
-            }
-        }
-        
-        for mut row in rows {
-            let row_id = row.row_id;
-            
-            // Apply updates to row.values
-            for (col_name, new_val) in &updates {
-                let col_idx = if let Some(&idx) = column_mapping.get(col_name) {
-                    Some(idx)
-                } else if col_name.starts_with("col") {
-                    col_name[3..].parse::<usize>().ok()
-                } else {
-                    None
-                };
+        let column_mapping = table_engine.build_column_mapping();
+        let count = row_ids.len();
 
-                if let Some(idx) = col_idx {
-                    if idx < row.values.len() {
-                        row.values[idx] = new_val.clone();
+        for row_id in row_ids {
+            if let Some(mut row) = table_engine.get_by_id(row_id)? {
+                // Apply updates to row.values
+                for (col_name, new_val) in &updates {
+                    let col_idx = if let Some(&idx) = column_mapping.get(col_name) {
+                        Some(idx)
+                    } else if col_name.starts_with("col") {
+                        col_name[3..].parse::<usize>().ok()
+                    } else {
+                        None
+                    };
+
+                    if let Some(idx) = col_idx {
+                        if idx < row.values.len() {
+                            row.values[idx] = new_val.clone();
+                        }
                     }
                 }
+
+                table_engine.update_row(row_id, row.values)?;
             }
-            
-            table_engine.update_row(row_id, row.values)?;
         }
 
         Ok(count)
     }
 
     fn delete(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
-        // Get rows to delete
-        let rows = self.scan(table, filters)?;
-        let count = rows.len();
+        // Collect matching row_ids in a single scan pass
+        let row_ids: Vec<u64> = self.scan(table, filters)?
+            .into_iter()
+            .map(|r| r.row_id)
+            .collect();
 
-        // Delete each row
-        let table_engine = self.get_table_mut(table)?;
-        for row in rows {
-            table_engine.delete_by_id(row.row_id)?;
+        if row_ids.is_empty() {
+            return Ok(0);
         }
 
-        Ok(count)
+        // Delete each row by ID (no second scan needed)
+        let table_engine = self.get_table_mut(table)?;
+        for row_id in &row_ids {
+            table_engine.delete_by_id(*row_id)?;
+        }
+
+        Ok(row_ids.len())
     }
 
     fn count(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
+        // Fast path: no filters means we can use the cached active_count
+        if filters.is_empty() {
+            let table_engine = self.get_table_mut(table)?;
+            return Ok(table_engine.active_row_count());
+        }
         let rows = self.scan(table, filters)?;
         Ok(rows.len())
     }

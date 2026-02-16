@@ -2,34 +2,78 @@
 //
 // Type-safe query construction without SQL parsing
 
+use crate::index::LikePattern;
 use crate::storage::Value;
 use std::fmt;
 
 /// Query filter for a single column
 ///
 /// Represents a condition like "age > 18" or "name LIKE 'John%'"
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Filter {
     /// Column name to filter on
     pub column: String,
     /// Comparison operator and value(s)
     pub operator: Operator,
+    /// Cached parsed LikePattern for Like/NotLike operators
+    cached_like: Option<LikePattern>,
+}
+
+impl PartialEq for Filter {
+    fn eq(&self, other: &Self) -> bool {
+        self.column == other.column && self.operator == other.operator
+    }
 }
 
 impl Filter {
-    /// Create a new filter
+    /// Create a new filter, pre-sorting In/NotIn lists and caching LikePatterns
     pub fn new(column: impl Into<String>, operator: Operator) -> Self {
+        let operator = match operator {
+            Operator::In(mut values) => {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                Operator::In(values)
+            }
+            Operator::NotIn(mut values) => {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                Operator::NotIn(values)
+            }
+            other => other,
+        };
+        // Pre-parse LIKE/NOT LIKE patterns
+        let cached_like = match &operator {
+            Operator::Like(pattern) | Operator::NotLike(pattern) => {
+                LikePattern::parse(pattern).ok()
+            }
+            _ => None,
+        };
         Self {
             column: column.into(),
             operator,
+            cached_like,
         }
     }
 
     /// Evaluate filter against a value
     ///
-    /// Returns true if the value matches the filter condition
+    /// Uses cached LikePattern for Like/NotLike operators to avoid re-parsing
     pub fn matches(&self, value: &Value) -> bool {
-        self.operator.matches(value)
+        match &self.operator {
+            Operator::Like(_) => {
+                if let Some(ref pattern) = self.cached_like {
+                    pattern.matches(value)
+                } else {
+                    false
+                }
+            }
+            Operator::NotLike(_) => {
+                if let Some(ref pattern) = self.cached_like {
+                    !pattern.matches(value)
+                } else {
+                    false
+                }
+            }
+            _ => self.operator.matches(value),
+        }
     }
 }
 
@@ -99,8 +143,12 @@ impl Operator {
                 let le_end = value.partial_cmp(end).map_or(false, |ord| ord != std::cmp::Ordering::Greater);
                 ge_start && le_end
             }
-            Operator::In(values) => values.contains(value),
-            Operator::NotIn(values) => !values.contains(value),
+            Operator::In(values) => values.binary_search_by(|v| {
+                v.partial_cmp(value).unwrap_or(std::cmp::Ordering::Equal)
+            }).is_ok(),
+            Operator::NotIn(values) => values.binary_search_by(|v| {
+                v.partial_cmp(value).unwrap_or(std::cmp::Ordering::Equal)
+            }).is_err(),
             Operator::Like(pattern) => {
                 if let Value::Varchar(_) = value {
                     // Use simple pattern matching
@@ -133,15 +181,22 @@ impl Operator {
 
     /// Check if this operator can use an index for optimization
     pub fn can_use_index(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Operator::Equals(_)
-                | Operator::GreaterThan(_)
-                | Operator::GreaterThanOrEqual(_)
-                | Operator::LessThan(_)
-                | Operator::LessThanOrEqual(_)
-                | Operator::Between(_, _)
-        )
+            | Operator::GreaterThan(_)
+            | Operator::GreaterThanOrEqual(_)
+            | Operator::LessThan(_)
+            | Operator::LessThanOrEqual(_)
+            | Operator::Between(_, _) => true,
+            Operator::Like(pattern) => {
+                if let Ok(lp) = LikePattern::parse(pattern) {
+                    lp.can_use_index()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 }
 
@@ -320,7 +375,10 @@ mod tests {
         assert!(Operator::Equals(Value::Int32(1)).can_use_index());
         assert!(Operator::GreaterThan(Value::Int32(1)).can_use_index());
         assert!(Operator::Between(Value::Int32(1), Value::Int32(10)).can_use_index());
-        assert!(!Operator::Like("test%".to_string()).can_use_index());
+        // Prefix LIKE can use an index
+        assert!(Operator::Like("test%".to_string()).can_use_index());
+        // Non-prefix LIKE cannot
+        assert!(!Operator::Like("%test%".to_string()).can_use_index());
         assert!(!Operator::IsNull.can_use_index());
     }
 

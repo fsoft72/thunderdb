@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 /// Entry in the Record Address Table
@@ -65,6 +65,8 @@ impl RatEntry {
 pub struct RecordAddressTable {
     /// Entries keyed by row_id (BTreeMap maintains sorted order)
     entries: BTreeMap<u64, RatEntry>,
+    /// Cached count of active (non-deleted) entries for O(1) access
+    active_count: usize,
     /// Whether the RAT has been modified since last save
     dirty: bool,
 }
@@ -78,6 +80,7 @@ impl RecordAddressTable {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            active_count: 0,
             dirty: false,
         }
     }
@@ -96,7 +99,8 @@ impl RecordAddressTable {
             return Ok(Self::new());
         }
 
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
+        let mut file = BufReader::new(file);
 
         // Read and verify header
         let mut magic = [0u8; 4];
@@ -128,8 +132,10 @@ impl RecordAddressTable {
             entries.insert(entry.row_id, entry);
         }
 
+        let active_count = entries.values().filter(|e| !e.deleted).count();
         Ok(Self {
             entries,
+            active_count,
             dirty: false,
         })
     }
@@ -141,19 +147,21 @@ impl RecordAddressTable {
     pub fn save<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref();
 
-        let mut file = File::create(path)?;
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
 
         // Write header
-        file.write_all(&RAT_MAGIC)?;
-        file.write_all(&RAT_VERSION.to_le_bytes())?;
-        file.write_all(&(self.entries.len() as u64).to_le_bytes())?;
+        writer.write_all(&RAT_MAGIC)?;
+        writer.write_all(&RAT_VERSION.to_le_bytes())?;
+        writer.write_all(&(self.entries.len() as u64).to_le_bytes())?;
 
         // Write entries (BTreeMap iterates in sorted key order)
         for entry in self.entries.values() {
-            file.write_all(&entry.to_bytes())?;
+            writer.write_all(&entry.to_bytes())?;
         }
 
-        file.sync_all()?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
         self.dirty = false;
 
         Ok(())
@@ -177,6 +185,7 @@ impl RecordAddressTable {
                     length,
                     deleted: false,
                 });
+                self.active_count += 1;
                 self.dirty = true;
                 Ok(())
             } else {
@@ -189,6 +198,7 @@ impl RecordAddressTable {
                 length,
                 deleted: false,
             });
+            self.active_count += 1;
             self.dirty = true;
             Ok(())
         }
@@ -199,6 +209,7 @@ impl RecordAddressTable {
     /// # Arguments
     /// * `batch` - Vector of (row_id, offset, length) tuples
     pub fn bulk_insert(&mut self, batch: Vec<(u64, u64, u32)>) -> Result<()> {
+        let count = batch.len();
         for (row_id, offset, length) in batch {
             self.entries.insert(row_id, RatEntry {
                 row_id,
@@ -207,6 +218,7 @@ impl RecordAddressTable {
                 deleted: false,
             });
         }
+        self.active_count += count;
         self.dirty = true;
         Ok(())
     }
@@ -239,6 +251,7 @@ impl RecordAddressTable {
         if let Some(entry) = self.entries.get_mut(&row_id) {
             if ! entry.deleted {
                 entry.deleted = true;
+                self.active_count -= 1;
                 self.dirty = true;
                 return true;
             }
@@ -256,9 +269,9 @@ impl RecordAddressTable {
         self.entries.is_empty()
     }
 
-    /// Get the number of active (non-deleted) entries
+    /// Get the number of active (non-deleted) entries (O(1) cached)
     pub fn active_count(&self) -> usize {
-        self.entries.values().filter(|e| !e.deleted).count()
+        self.active_count
     }
 
     /// Check if RAT has been modified
@@ -289,6 +302,8 @@ impl RecordAddressTable {
         if self.entries.len() != old_len {
             self.dirty = true;
         }
+        // active_count should already be correct, but ensure consistency after compact
+        self.active_count = self.entries.len();
     }
 }
 

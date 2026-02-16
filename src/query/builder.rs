@@ -4,6 +4,7 @@
 
 use crate::query::{Filter, Operator};
 use crate::storage::{Row, Value};
+use std::collections::HashMap;
 
 /// Query builder for fluent query construction
 ///
@@ -202,7 +203,7 @@ impl QueryPlan {
     pub fn apply_ordering(
         &self,
         mut rows: Vec<Row>,
-        column_mapping: &std::collections::HashMap<String, usize>,
+        column_mapping: &HashMap<String, usize>,
     ) -> Vec<Row> {
         if let Some((column, direction)) = &self.order_by {
             if let Some(&col_idx) = column_mapping.get(column) {
@@ -232,7 +233,7 @@ impl QueryPlan {
     pub fn apply_projection(
         &self,
         rows: Vec<Row>,
-        column_mapping: &std::collections::HashMap<String, usize>,
+        column_mapping: &HashMap<String, usize>,
     ) -> Vec<Row> {
         if let Some(columns) = &self.columns {
             let col_indices: Vec<usize> = columns

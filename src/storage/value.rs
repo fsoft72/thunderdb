@@ -212,6 +212,19 @@ impl Value {
         Ok((value, consumed))
     }
 
+    /// Get the serialized byte size without actually serializing
+    pub fn serialized_size(&self) -> usize {
+        match self {
+            Value::Int32(_) => 5,        // 1 tag + 4 bytes
+            Value::Int64(_) => 9,        // 1 tag + 8 bytes
+            Value::Float32(_) => 5,      // 1 tag + 4 bytes
+            Value::Float64(_) => 9,      // 1 tag + 8 bytes
+            Value::Varchar(s) => 1 + 4 + s.as_bytes().len(), // tag + len prefix + data
+            Value::Timestamp(_) => 9,    // 1 tag + 8 bytes
+            Value::Null => 1,            // 1 tag
+        }
+    }
+
     /// Get the type name as a string
     pub fn type_name(&self) -> &str {
         match self {

@@ -34,6 +34,8 @@ pub struct DataFile {
     last_sync: Option<std::time::Instant>,
     /// Group commit interval in ms (0 = disabled)
     group_commit_ms: u64,
+    /// Whether the BufWriter has unflushed data
+    dirty: bool,
 }
 
 impl DataFile {
@@ -81,6 +83,7 @@ impl DataFile {
                 read_buffer: Vec::with_capacity(1024),
                 last_sync: None,
                 group_commit_ms: _group_ms,
+                dirty: false,
             })
         }
         #[cfg(target_arch = "wasm32")]
@@ -100,6 +103,7 @@ impl DataFile {
             read_buffer: Vec::with_capacity(1024),
             last_sync: None,
             group_commit_ms: 0,
+            dirty: false,
         })
     }
 
@@ -131,6 +135,8 @@ impl DataFile {
 
                 // Write row data
                 writer.write_all(&self.write_buffer)?;
+
+                self.dirty = true;
             }
             DataFileBackend::Memory(data) => {
                 data.push(ACTIVE_MARKER);
@@ -193,6 +199,7 @@ impl DataFile {
             DataFileBackend::File(writer) => {
                 writer.seek(SeekFrom::End(0))?;
                 writer.write_all(&self.write_buffer)?;
+                self.dirty = true;
             }
             DataFileBackend::Memory(data) => {
                 data.extend_from_slice(&self.write_buffer);
@@ -220,8 +227,11 @@ impl DataFile {
 
         match &mut self.backend {
             DataFileBackend::File(writer) => {
-                // Flush buffered writes before reading
-                writer.flush()?;
+                // Only flush buffered writes if there are pending writes
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
                 let file = writer.get_mut();
 
                 // Seek to offset
@@ -297,7 +307,10 @@ impl DataFile {
         match &mut self.backend {
             DataFileBackend::File(writer) => {
                 // Flush buffered writes before random-access write
-                writer.flush()?;
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
                 let file = writer.get_mut();
 
                 // Seek to offset
@@ -328,6 +341,7 @@ impl DataFile {
             writer.flush()?;
             writer.get_mut().sync_all()?;
             self.last_sync = Some(std::time::Instant::now());
+            self.dirty = false;
         }
         Ok(())
     }
@@ -347,6 +361,7 @@ impl DataFile {
                 writer.flush()?;
                 writer.get_mut().sync_all()?;
                 self.last_sync = Some(std::time::Instant::now());
+                self.dirty = false;
             } else {
                 // Group commit: only sync if threshold exceeded
                 let should_sync = match self.last_sync {
@@ -357,10 +372,77 @@ impl DataFile {
                     writer.flush()?;
                     writer.get_mut().sync_all()?;
                     self.last_sync = Some(std::time::Instant::now());
+                    self.dirty = false;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Scan active rows with an optional limit for early termination
+    pub fn scan_rows_limited(&mut self, limit: Option<usize>) -> Result<Vec<Row>> {
+        let max_rows = limit.unwrap_or(usize::MAX);
+        let mut results = Vec::new();
+        let mut row_buffer = Vec::with_capacity(1024);
+
+        match &mut self.backend {
+            DataFileBackend::File(writer) => {
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
+                let file = writer.get_mut();
+
+                file.seek(SeekFrom::Start(0))?;
+                loop {
+                    if results.len() >= max_rows {
+                        break;
+                    }
+                    let mut marker = [0u8; 1];
+                    match file.read_exact(&mut marker) {
+                        Ok(_) => {}
+                        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => return Err(e.into()),
+                    }
+
+                    let mut length_buf = [0u8; 4];
+                    file.read_exact(&mut length_buf)?;
+                    let length = u32::from_le_bytes(length_buf) as usize;
+
+                    if marker[0] == TOMBSTONE_MARKER {
+                        file.seek(SeekFrom::Current(length as i64))?;
+                    } else {
+                        if row_buffer.len() < length {
+                            row_buffer.resize(length, 0);
+                        }
+                        file.read_exact(&mut row_buffer[..length])?;
+                        results.push(Row::from_bytes(&row_buffer[..length])?);
+                    }
+                }
+            }
+            DataFileBackend::Memory(data) => {
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    if results.len() >= max_rows {
+                        break;
+                    }
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let mut length_buf = [0u8; 4];
+                    length_buf.copy_from_slice(&data[cursor..cursor+4]);
+                    let length = u32::from_le_bytes(length_buf) as usize;
+                    cursor += 4;
+
+                    if marker != TOMBSTONE_MARKER {
+                        results.push(Row::from_bytes(&data[cursor..cursor+length])?);
+                    }
+                    cursor += length;
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Get current file size
@@ -377,11 +459,14 @@ impl DataFile {
     pub fn scan_rows(&mut self) -> Result<Vec<Row>> {
         let mut results = Vec::new();
         let mut row_buffer = Vec::with_capacity(1024);
-        
+
         match &mut self.backend {
             DataFileBackend::File(writer) => {
-                // Flush buffered writes before scanning
-                writer.flush()?;
+                // Only flush if there are pending writes
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
                 let file = writer.get_mut();
 
                 file.seek(SeekFrom::Start(0))?;
@@ -438,8 +523,11 @@ impl DataFile {
 
         match &mut self.backend {
             DataFileBackend::File(writer) => {
-                // Flush buffered writes before scanning
-                writer.flush()?;
+                // Only flush if there are pending writes
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
                 let file = writer.get_mut();
 
                 file.seek(SeekFrom::Start(0))?;

@@ -154,7 +154,7 @@ impl QueryContext {
 pub fn apply_filters(
     row: &Row,
     filters: &[Filter],
-    column_mapping: &std::collections::HashMap<String, usize>,
+    column_mapping: &HashMap<String, usize>,
 ) -> bool {
     for filter in filters {
         let col_idx = if let Some(&idx) = column_mapping.get(&filter.column) {

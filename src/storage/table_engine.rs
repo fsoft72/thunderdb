@@ -4,8 +4,9 @@ use crate::error::Result;
 use crate::error::Error;
 use crate::storage::{DataFile, RecordAddressTable, Row, Value};
 use crate::index::IndexManager;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 
 /// Column metadata
@@ -36,8 +37,10 @@ pub struct TableEngine {
     rat: RecordAddressTable,
     index_manager: IndexManager,
     schema: Option<TableSchema>,
-    next_row_id: AtomicU64,
+    next_row_id: u64,
     config: StorageConfig,
+    /// Cached column name -> position mapping, invalidated on schema change
+    column_mapping_cache: Option<Arc<HashMap<String, usize>>>,
 }
 
 impl TableEngine {
@@ -88,7 +91,7 @@ impl TableEngine {
 
         // Determine next row ID
         let max_row_id = rat.row_ids().into_iter().max().unwrap_or(0);
-        let next_row_id = AtomicU64::new(max_row_id + 1);
+        let next_row_id = max_row_id + 1;
 
         Ok(Self {
             name: name.to_string(),
@@ -99,6 +102,7 @@ impl TableEngine {
             schema,
             next_row_id,
             config,
+            column_mapping_cache: None,
         })
     }
 
@@ -115,8 +119,9 @@ impl TableEngine {
             rat,
             index_manager,
             schema: None,
-            next_row_id: AtomicU64::new(1),
+            next_row_id: 1,
             config,
+            column_mapping_cache: None,
         })
     }
 
@@ -156,12 +161,7 @@ impl TableEngine {
 
         // Rebuild indices in memory
         if ! mem_table.index_manager.indexed_columns().is_empty() {
-            let mut mapping = std::collections::HashMap::new();
-            if let Some(schema) = &mem_table.schema {
-                for (i, col) in schema.columns.iter().enumerate() {
-                    mapping.insert(col.name.clone(), i);
-                }
-            }
+            let mapping = mem_table.build_column_mapping();
             let rows = mem_table.scan_all()?;
             for col in mem_table.index_manager.indexed_columns().to_vec() {
                 mem_table.index_manager.rebuild_index(&col, &rows, &mapping)?;
@@ -182,6 +182,7 @@ impl TableEngine {
             }
         }
         self.schema = Some(schema);
+        self.column_mapping_cache = None; // Invalidate cache on schema change
         Ok(())
     }
 
@@ -227,7 +228,8 @@ impl TableEngine {
     /// The auto-generated row_id
     pub fn insert_row(&mut self, values: Vec<Value>) -> Result<u64> {
         // Generate new row ID
-        let row_id = self.next_row_id.fetch_add(1, Ordering::SeqCst);
+        let row_id = self.next_row_id;
+        self.next_row_id += 1;
 
         // Create row
         let row = Row::new(row_id, values);
@@ -263,7 +265,8 @@ impl TableEngine {
         }
 
         // 1. Generate all row IDs upfront
-        let start_id = self.next_row_id.fetch_add(rows.len() as u64, Ordering::SeqCst);
+        let start_id = self.next_row_id;
+        self.next_row_id += rows.len() as u64;
         let row_ids: Vec<u64> = (start_id..start_id + rows.len() as u64).collect();
 
         // 2. Create all Row objects
@@ -284,12 +287,10 @@ impl TableEngine {
             .collect();
         self.rat.bulk_insert(rat_entries)?;
 
-        // 5. Batch index updates (column mapping computed once)
+        // 5. Batch index updates (sorted insertion for better cache locality)
         if !self.index_manager.indexed_columns().is_empty() {
             let mapping = self.build_column_mapping();
-            for row in &row_objects {
-                self.index_manager.insert_row(row, &mapping)?;
-            }
+            self.index_manager.insert_rows_batch(&row_objects, &mapping)?;
         }
 
         Ok(row_ids)
@@ -410,16 +411,30 @@ impl TableEngine {
 
     /// Get multiple rows by their IDs
     ///
-    /// Efficiently fetches rows for a set of pre-filtered row IDs (e.g. from
-    /// multi-index intersection). Skips missing/deleted rows.
+    /// Sorts reads by file offset for sequential I/O access pattern.
+    /// Skips missing/deleted rows.
     pub fn get_by_ids(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
-        let mut rows = Vec::with_capacity(row_ids.len());
+        // Collect (row_id, offset, length) and sort by offset for sequential I/O
+        let mut entries: Vec<(u64, u64, u32)> = Vec::with_capacity(row_ids.len());
         for &row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
+            if let Some((offset, length)) = self.rat.get(row_id) {
+                entries.push((row_id, offset, length));
+            }
+        }
+        entries.sort_by_key(|&(_, offset, _)| offset);
+
+        let mut rows = Vec::with_capacity(entries.len());
+        for (_, offset, length) in entries {
+            if let Some(row) = self.data_file.read_row(offset, length)? {
                 rows.push(row);
             }
         }
         Ok(rows)
+    }
+
+    /// Get the number of active rows without scanning (O(1))
+    pub fn active_row_count(&self) -> usize {
+        self.rat.active_count()
     }
 
     /// Get all active row IDs
@@ -434,6 +449,11 @@ impl TableEngine {
         // Sequential scan of the data file is much faster than random access
         // because it avoids seeks and benefits from OS prefetching.
         self.data_file.scan_rows()
+    }
+
+    /// Scan active rows with an optional limit for early termination
+    pub fn scan_all_limited(&mut self, limit: Option<usize>) -> Result<Vec<Row>> {
+        self.data_file.scan_rows_limited(limit)
     }
 
     /// Get table statistics
@@ -552,11 +572,17 @@ impl TableEngine {
             max_row_id = max_row_id.max(row_id);
         }
 
-        self.next_row_id.store(max_row_id + 1, Ordering::SeqCst);
+        self.next_row_id = max_row_id + 1;
 
         self.flush()?;
 
         Ok(())
+    }
+
+    /// Fetch rows by a list of row IDs, skipping missing/deleted entries.
+    /// Sorts by file offset for sequential I/O.
+    fn fetch_rows_by_ids(&mut self, row_ids: Vec<u64>) -> Result<Vec<Row>> {
+        self.get_by_ids(&row_ids)
     }
 
     /// Greater than search using an index
@@ -567,13 +593,7 @@ impl TableEngine {
         inclusive: bool,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.greater_than(column_name, value, inclusive)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.fetch_rows_by_ids(row_ids)
     }
 
     /// Less than search using an index
@@ -584,39 +604,19 @@ impl TableEngine {
         inclusive: bool,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.less_than(column_name, value, inclusive)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.fetch_rows_by_ids(row_ids)
     }
 
     /// Prefix search using an index
     pub fn prefix_search_by_index(&mut self, column_name: &str, prefix: &str) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.prefix_search(column_name, prefix)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.fetch_rows_by_ids(row_ids)
     }
 
     /// Search for rows matching a value using an index
     pub fn search_by_index(&mut self, column_name: &str, value: &Value) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.search(column_name, value)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-
-        Ok(rows)
+        self.fetch_rows_by_ids(row_ids)
     }
 
     /// Range search using an index
@@ -627,26 +627,23 @@ impl TableEngine {
         end_value: &Value,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.range_query(column_name, start_value, end_value)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-
-        Ok(rows)
+        self.fetch_rows_by_ids(row_ids)
     }
 
-    /// Build a column name -> position mapping from the schema
-    fn build_column_mapping(&self) -> std::collections::HashMap<String, usize> {
-        let mut mapping = std::collections::HashMap::new();
+    /// Build a column name -> position mapping from the schema (cached)
+    pub fn build_column_mapping(&mut self) -> Arc<HashMap<String, usize>> {
+        if let Some(ref cached) = self.column_mapping_cache {
+            return Arc::clone(cached);
+        }
+        let mut mapping = HashMap::new();
         if let Some(schema) = &self.schema {
             for (i, col) in schema.columns.iter().enumerate() {
                 mapping.insert(col.name.clone(), i);
             }
         }
-        mapping
+        let arc = Arc::new(mapping);
+        self.column_mapping_cache = Some(Arc::clone(&arc));
+        arc
     }
 
     /// Get index manager
@@ -1143,7 +1140,7 @@ mod tests {
 
         // Rebuild index after inserts since insert_row doesn't auto-index without mapping
         let rows = table.scan_all().unwrap();
-        let mut mapping = std::collections::HashMap::new();
+        let mut mapping = HashMap::new();
         mapping.insert("id".to_string(), 0);
         mapping.insert("name".to_string(), 1);
         table.index_manager_mut().rebuild_index("id", &rows, &mapping).unwrap();
