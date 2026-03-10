@@ -67,6 +67,8 @@ pub struct RecordAddressTable {
     entries: BTreeMap<u64, RatEntry>,
     /// Whether the RAT has been modified since last save
     dirty: bool,
+    /// Cached count of active (non-deleted) entries — maintained incrementally
+    cached_active: usize,
 }
 
 // Magic number for RAT file format: "RAT\0"
@@ -79,6 +81,7 @@ impl RecordAddressTable {
         Self {
             entries: BTreeMap::new(),
             dirty: false,
+            cached_active: 0,
         }
     }
 
@@ -128,9 +131,11 @@ impl RecordAddressTable {
             entries.insert(entry.row_id, entry);
         }
 
+        let cached_active = entries.values().filter(|e| !e.deleted).count();
         Ok(Self {
             entries,
             dirty: false,
+            cached_active,
         })
     }
 
@@ -177,6 +182,7 @@ impl RecordAddressTable {
                     length,
                     deleted: false,
                 });
+                self.cached_active += 1;
                 self.dirty = true;
                 Ok(())
             } else {
@@ -189,6 +195,7 @@ impl RecordAddressTable {
                 length,
                 deleted: false,
             });
+            self.cached_active += 1;
             self.dirty = true;
             Ok(())
         }
@@ -199,6 +206,7 @@ impl RecordAddressTable {
     /// # Arguments
     /// * `batch` - Vector of (row_id, offset, length) tuples
     pub fn bulk_insert(&mut self, batch: Vec<(u64, u64, u32)>) -> Result<()> {
+        let count = batch.len();
         for (row_id, offset, length) in batch {
             self.entries.insert(row_id, RatEntry {
                 row_id,
@@ -207,6 +215,7 @@ impl RecordAddressTable {
                 deleted: false,
             });
         }
+        self.cached_active += count;
         self.dirty = true;
         Ok(())
     }
@@ -239,6 +248,7 @@ impl RecordAddressTable {
         if let Some(entry) = self.entries.get_mut(&row_id) {
             if ! entry.deleted {
                 entry.deleted = true;
+                self.cached_active -= 1;
                 self.dirty = true;
                 return true;
             }
@@ -256,9 +266,9 @@ impl RecordAddressTable {
         self.entries.is_empty()
     }
 
-    /// Get the number of active (non-deleted) entries
+    /// Get the number of active (non-deleted) entries — O(1)
     pub fn active_count(&self) -> usize {
-        self.entries.values().filter(|e| !e.deleted).count()
+        self.cached_active
     }
 
     /// Check if RAT has been modified
@@ -294,6 +304,7 @@ impl RecordAddressTable {
         let old_len = self.entries.len();
         self.entries.retain(|_, e| !e.deleted);
         if self.entries.len() != old_len {
+            self.cached_active = self.entries.len();
             self.dirty = true;
         }
     }
