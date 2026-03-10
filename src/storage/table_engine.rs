@@ -410,12 +410,31 @@ impl TableEngine {
 
     /// Get multiple rows by their IDs
     ///
-    /// Efficiently fetches rows for a set of pre-filtered row IDs (e.g. from
-    /// multi-index intersection). Skips missing/deleted rows.
+    /// Resolves all (offset, length) entries from the RAT, sorts by disk
+    /// offset for sequential I/O, then reads rows in one pass.
+    /// Skips missing/deleted rows.
     pub fn get_by_ids(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
-        let mut rows = Vec::with_capacity(row_ids.len());
+        self.fetch_rows_sorted_by_offset(row_ids)
+    }
+
+    /// Resolve RAT entries for the given row_ids, sort by on-disk offset,
+    /// and read rows sequentially to avoid scattered seeks.
+    fn fetch_rows_sorted_by_offset(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
+        // Resolve RAT entries, filtering out missing/deleted rows
+        let mut entries: Vec<(u64, u32)> = Vec::with_capacity(row_ids.len());
         for &row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
+            if let Some((offset, length)) = self.rat.get(row_id) {
+                entries.push((offset, length));
+            }
+        }
+
+        // Sort by offset for sequential disk access
+        entries.sort_unstable_by_key(|&(offset, _)| offset);
+
+        // Read rows in offset order
+        let mut rows = Vec::with_capacity(entries.len());
+        for (offset, length) in entries {
+            if let Some(row) = self.data_file.read_row(offset, length)? {
                 rows.push(row);
             }
         }
@@ -567,13 +586,7 @@ impl TableEngine {
         inclusive: bool,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.greater_than(column_name, value, inclusive)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.fetch_rows_sorted_by_offset(&row_ids)
     }
 
     /// Less than search using an index
@@ -584,39 +597,19 @@ impl TableEngine {
         inclusive: bool,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.less_than(column_name, value, inclusive)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.fetch_rows_sorted_by_offset(&row_ids)
     }
 
     /// Prefix search using an index
     pub fn prefix_search_by_index(&mut self, column_name: &str, prefix: &str) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.prefix_search(column_name, prefix)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.fetch_rows_sorted_by_offset(&row_ids)
     }
 
     /// Search for rows matching a value using an index
     pub fn search_by_index(&mut self, column_name: &str, value: &Value) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.search(column_name, value)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-
-        Ok(rows)
+        self.fetch_rows_sorted_by_offset(&row_ids)
     }
 
     /// Range search using an index
@@ -627,15 +620,7 @@ impl TableEngine {
         end_value: &Value,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.range_query(column_name, start_value, end_value)?;
-        let mut rows = Vec::with_capacity(row_ids.len());
-
-        for row_id in row_ids {
-            if let Some(row) = self.get_by_id(row_id)? {
-                rows.push(row);
-            }
-        }
-
-        Ok(rows)
+        self.fetch_rows_sorted_by_offset(&row_ids)
     }
 
     /// Build a column name -> position mapping from the schema
