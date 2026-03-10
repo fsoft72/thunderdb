@@ -266,6 +266,13 @@ impl RecordAddressTable {
         self.dirty
     }
 
+    /// Get the maximum row ID in the table, or None if empty.
+    ///
+    /// O(log n) via BTreeMap::keys().next_back() — no allocation.
+    pub fn max_row_id(&self) -> Option<u64> {
+        self.entries.keys().next_back().copied()
+    }
+
     /// Get all row IDs (including deleted)
     pub fn row_ids(&self) -> Vec<u64> {
         self.entries.keys().cloned().collect()

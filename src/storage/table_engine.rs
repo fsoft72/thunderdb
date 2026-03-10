@@ -86,8 +86,8 @@ impl TableEngine {
             None
         };
 
-        // Determine next row ID
-        let max_row_id = rat.row_ids().into_iter().max().unwrap_or(0);
+        // Determine next row ID — O(log n) via BTreeMap last key
+        let max_row_id = rat.max_row_id().unwrap_or(0);
         let next_row_id = AtomicU64::new(max_row_id + 1);
 
         Ok(Self {
