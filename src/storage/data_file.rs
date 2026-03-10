@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::storage::row::Row;
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Tombstone marker for deleted rows (single byte prefix)
@@ -377,33 +377,36 @@ impl DataFile {
     pub fn scan_rows(&mut self) -> Result<Vec<Row>> {
         let mut results = Vec::new();
         let mut row_buffer = Vec::with_capacity(1024);
-        
+
         match &mut self.backend {
             DataFileBackend::File(writer) => {
                 // Flush buffered writes before scanning
                 writer.flush()?;
                 let file = writer.get_mut();
-
                 file.seek(SeekFrom::Start(0))?;
+
+                // Wrap in BufReader to reduce per-row syscalls
+                let mut reader = BufReader::with_capacity(256 * 1024, &*file);
                 loop {
                     let mut marker = [0u8; 1];
-                    match file.read_exact(&mut marker) {
+                    match reader.read_exact(&mut marker) {
                         Ok(_) => {}
                         Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                         Err(e) => return Err(e.into()),
                     }
 
                     let mut length_buf = [0u8; 4];
-                    file.read_exact(&mut length_buf)?;
+                    reader.read_exact(&mut length_buf)?;
                     let length = u32::from_le_bytes(length_buf) as usize;
 
                     if marker[0] == TOMBSTONE_MARKER {
-                        file.seek(SeekFrom::Current(length as i64))?;
+                        // Skip deleted row data
+                        std::io::copy(&mut reader.by_ref().take(length as u64), &mut std::io::sink())?;
                     } else {
                         if row_buffer.len() < length {
                             row_buffer.resize(length, 0);
                         }
-                        file.read_exact(&mut row_buffer[..length])?;
+                        reader.read_exact(&mut row_buffer[..length])?;
                         results.push(Row::from_bytes(&row_buffer[..length])?);
                     }
                 }
@@ -443,10 +446,11 @@ impl DataFile {
                 let file = writer.get_mut();
 
                 file.seek(SeekFrom::Start(0))?;
+                let mut reader = BufReader::with_capacity(256 * 1024, &*file);
                 let mut offset = 0u64;
                 loop {
                     let mut marker = [0u8; 1];
-                    match file.read_exact(&mut marker) {
+                    match reader.read_exact(&mut marker) {
                         Ok(_) => {}
                         Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                         Err(e) => return Err(e.into()),
@@ -454,15 +458,16 @@ impl DataFile {
 
                     let deleted = marker[0] == TOMBSTONE_MARKER;
                     let mut length_buf = [0u8; 4];
-                    file.read_exact(&mut length_buf)?;
+                    reader.read_exact(&mut length_buf)?;
                     let length = u32::from_le_bytes(length_buf);
 
                     let mut row_id_buf = [0u8; 8];
-                    file.read_exact(&mut row_id_buf)?;
+                    reader.read_exact(&mut row_id_buf)?;
                     let row_id = u64::from_le_bytes(row_id_buf);
 
+                    // Skip remaining row data past the row_id
                     if length > 8 {
-                        file.seek(SeekFrom::Current((length - 8) as i64))?;
+                        std::io::copy(&mut reader.by_ref().take((length - 8) as u64), &mut std::io::sink())?;
                     }
 
                     results.push((offset, length, row_id, deleted));
