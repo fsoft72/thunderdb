@@ -27,3 +27,37 @@
 - `TableEngine::open`, `open_in_memory`, `create`, and `load_to_memory` now accept a `btree_order` parameter.
 - `Database` passes `config.index.btree_order` when creating table engines, replacing the hardcoded `100`.
 - Files changed: `src/storage/table_engine.rs`, `src/lib.rs`
+
+## 2026-03-10: Performance improvements (#6-#11 from IMPROVEMENTS.md)
+
+### 6. O(1) startup: next_row_id from BTreeMap last key (issue #6)
+- Added `RecordAddressTable::max_row_id()` using `BTreeMap::keys().next_back()`.
+- `TableEngine::open` uses `rat.max_row_id()` instead of `rat.row_ids().into_iter().max()`.
+- Files changed: `src/storage/rat.rs`, `src/storage/table_engine.rs`
+
+### 7. O(1) active_count via cached counter (issue #7)
+- Added `cached_active` field to `RecordAddressTable`, maintained incrementally on insert/delete/bulk_insert/compact/load.
+- `active_count()` is now O(1) instead of O(n).
+- Files changed: `src/storage/rat.rs`
+
+### 8. Reduce per-row syscalls in full scans (issue #8)
+- Wrapped `scan_rows()` and `scan_all()` File branches in `BufReader::with_capacity(256KB)`.
+- Batches many small `read_exact()` calls into large sequential reads, reducing syscall overhead.
+- Files changed: `src/storage/data_file.rs`
+
+### 9. Reorder indexed row fetches by on-disk offset (issue #9)
+- Added `fetch_rows_sorted_by_offset()` which resolves RAT entries, sorts by disk offset, and reads sequentially.
+- Applied to `get_by_ids()`, `search_by_index()`, `greater/less_than_by_index()`, `prefix_search`, and `range_search`.
+- Files changed: `src/storage/table_engine.rs`
+
+### 10. Replace HashSet+format! cardinality counting (issue #10)
+- `IndexStatistics::from_btree()` now extracts key references, sorts them, and counts adjacent changes.
+- Eliminates `HashSet<String>` and `format!("{:?}", key)` heap allocation per entry.
+- Also replaced `partial_cmp()` with direct comparison operators in `record_insert()`.
+- Files changed: `src/index/stats.rs`
+
+### 11. Count-only execution path (issue #11)
+- `count()` without filters returns `rat.active_count()` in O(1).
+- With filters, counts matches without collecting into `Vec<Row>`.
+- Multi-index intersection with no remaining filters returns `row_ids.len()` directly.
+- Files changed: `src/lib.rs`
