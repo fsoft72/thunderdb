@@ -300,13 +300,50 @@ impl<'a> Repl<'a> {
     }
 
     /// Execute a SELECT statement
+    ///
+    /// Handles ORDER BY, column projection, LIMIT, and OFFSET.
+    /// When ORDER BY is present, all matching rows are fetched first so
+    /// they can be sorted before pagination is applied.
     fn execute_select(&mut self, select: &crate::parser::SelectStatement) -> Result<Vec<crate::storage::Row>> {
         let query = Executor::select_to_query(select);
-        let filters = query.get_filters().to_vec();
-        let limit = query.get_limit();
-        let offset = query.get_offset();
+        let has_ordering = query.get_order_by().is_some();
+        let has_projection = query.get_columns().is_some();
+        let plan = query.build();
 
-        self.database.scan_with_limit(&select.from, filters, limit, offset)
+        // When ORDER BY is active we need ALL matching rows before sorting,
+        // so skip limit/offset during the scan and apply them after sorting.
+        let (scan_limit, scan_offset) = if has_ordering {
+            (None, None)
+        } else {
+            (plan.limit, plan.offset)
+        };
+
+        let filters = plan.filters.clone();
+        let mut rows = self.database.scan_with_limit(
+            &plan.table, filters, scan_limit, scan_offset,
+        )?;
+
+        // Build column mapping for ordering / projection
+        if has_ordering || has_projection {
+            let mut column_mapping = std::collections::HashMap::new();
+            if let Some(table) = self.database.get_table(&plan.table) {
+                if let Some(schema) = table.schema() {
+                    for (i, col) in schema.columns.iter().enumerate() {
+                        column_mapping.insert(col.name.clone(), i);
+                    }
+                }
+            }
+
+            rows = plan.apply_ordering(rows, &column_mapping);
+
+            if has_ordering {
+                rows = plan.apply_pagination(rows);
+            }
+
+            rows = plan.apply_projection(rows, &column_mapping);
+        }
+
+        Ok(rows)
     }
 
     /// Show help message

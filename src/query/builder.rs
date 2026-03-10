@@ -211,7 +211,7 @@ impl QueryPlan {
                     let val_b = b.values.get(col_idx);
 
                     let cmp = match (val_a, val_b) {
-                        (Some(a), Some(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Some(a), Some(b)) => a.cmp(b),
                         (Some(_), None) => std::cmp::Ordering::Greater,
                         (None, Some(_)) => std::cmp::Ordering::Less,
                         (None, None) => std::cmp::Ordering::Equal,

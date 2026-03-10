@@ -16,7 +16,7 @@ pub enum NodeType {
 #[derive(Debug, Clone)]
 pub struct BTreeNode<K, V>
 where
-    K: Clone + PartialOrd + Debug,
+    K: Clone + Ord + Debug,
     V: Clone + Debug,
 {
     /// Unique node identifier
@@ -47,7 +47,7 @@ where
 
 impl<K, V> BTreeNode<K, V>
 where
-    K: Clone + PartialOrd + Debug,
+    K: Clone + Ord + Debug,
     V: Clone + Debug,
 {
     /// Create a new leaf node
@@ -102,7 +102,7 @@ where
     ///
     /// Returns the index where key should go
     pub fn find_position(&self, key: &K) -> usize {
-        match self.keys.binary_search_by(|k| k.partial_cmp(key).unwrap()) {
+        match self.keys.binary_search_by(|k| k.cmp(key)) {
             Ok(idx) => idx,
             Err(idx) => idx,
         }

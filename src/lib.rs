@@ -113,15 +113,16 @@ impl Database {
     /// Get a table, loading it if necessary. Fails if table doesn't exist.
     pub fn get_table_mut(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
+            let btree_order = self.config.index.btree_order;
             let table = if self.config.storage.in_memory {
-                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
+                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone(), btree_order)?
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
-                { TableEngine::open(name, &self.data_dir, self.config.storage.clone())? }
+                { TableEngine::open(name, &self.data_dir, self.config.storage.clone(), btree_order)? }
                 #[cfg(target_arch = "wasm32")]
-                { TableEngine::open_in_memory(name, self.config.storage.clone())? }
+                { TableEngine::open_in_memory(name, self.config.storage.clone(), btree_order)? }
             };
-            
+
             self.tables.insert(name.to_string(), table);
         }
         Ok(self.tables.get_mut(name).unwrap())
@@ -130,13 +131,14 @@ impl Database {
     /// Create or get a table.
     pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
+            let btree_order = self.config.index.btree_order;
             let table = if self.config.storage.in_memory {
-                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
+                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone(), btree_order)?
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
-                { TableEngine::create(name, &self.data_dir, self.config.storage.clone())? }
+                { TableEngine::create(name, &self.data_dir, self.config.storage.clone(), btree_order)? }
                 #[cfg(target_arch = "wasm32")]
-                { TableEngine::open_in_memory(name, self.config.storage.clone())? }
+                { TableEngine::open_in_memory(name, self.config.storage.clone(), btree_order)? }
             };
 
             self.tables.insert(name.to_string(), table);
