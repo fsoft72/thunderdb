@@ -441,8 +441,78 @@ impl DirectDataAccess for Database {
     }
 
     fn count(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
-        let rows = self.scan(table, filters)?;
-        Ok(rows.len())
+        // Fast path: no filters → O(1) from RAT
+        if filters.is_empty() {
+            let table_engine = self.get_table_mut(table)?;
+            return Ok(table_engine.stats().active_rows);
+        }
+
+        // Filtered path: reuse scan logic but only count, don't collect
+        let table_engine = self.get_table_mut(table)?;
+
+        let mut column_mapping = std::collections::HashMap::new();
+        if let Some(schema) = table_engine.schema() {
+            for (i, col) in schema.columns.iter().enumerate() {
+                column_mapping.insert(col.name.clone(), i);
+            }
+        }
+
+        let all_stats = table_engine.index_manager().all_stats();
+        let stats_ref = if all_stats.is_empty() { None } else { Some(all_stats) };
+
+        let mut remaining_filters = Vec::new();
+        let multi_result = multi_index_scan(
+            &filters,
+            table_engine.index_manager(),
+            stats_ref,
+            &mut remaining_filters,
+        );
+
+        let (source_rows, active_filters) = if let Some(row_ids) = multi_result {
+            // Count-only shortcut: if no remaining filters, just count IDs
+            if remaining_filters.is_empty() {
+                return Ok(row_ids.len());
+            }
+            let rows = table_engine.get_by_ids(&row_ids)?;
+            (rows, remaining_filters)
+        } else {
+            let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
+            if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
+                let source = match op {
+                    Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
+                    Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
+                    Operator::GreaterThan(val) => table_engine.greater_than_by_index(&col, &val, false)?,
+                    Operator::GreaterThanOrEqual(val) => table_engine.greater_than_by_index(&col, &val, true)?,
+                    Operator::LessThan(val) => table_engine.less_than_by_index(&col, &val, false)?,
+                    Operator::LessThanOrEqual(val) => table_engine.less_than_by_index(&col, &val, true)?,
+                    Operator::Like(pattern) => {
+                        use crate::index::LikePattern;
+                        if let Ok(lp) = LikePattern::parse(&pattern) {
+                            if let Some(prefix) = lp.get_prefix() {
+                                table_engine.prefix_search_by_index(&col, prefix)?
+                            } else {
+                                table_engine.scan_all()?
+                            }
+                        } else {
+                            table_engine.scan_all()?
+                        }
+                    }
+                    _ => table_engine.scan_all()?,
+                };
+                (source, filters)
+            } else {
+                (table_engine.scan_all()?, filters)
+            }
+        };
+
+        // Count matching rows without collecting them
+        let mut count = 0;
+        for row in source_rows {
+            if active_filters.is_empty() || apply_filters(&row, &active_filters, &column_mapping) {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 
