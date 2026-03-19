@@ -335,9 +335,10 @@ where
         }
     }
 
-    /// Insert a node into cache (O(n) only on eviction, O(1) amortized)
+    /// Insert a node into cache
     ///
-    /// Evicts least recently used node (lowest generation) if at capacity
+    /// O(1) when no eviction needed, O(n) when cache is full and must
+    /// scan for lowest generation entry to evict.
     pub fn insert(&mut self, node_id: u64, node: BTreeNode<K, V>) {
         self.generation += 1;
 

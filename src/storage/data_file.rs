@@ -426,6 +426,9 @@ impl DataFile {
                     if results.len() >= max_rows {
                         break;
                     }
+                    if cursor + 1 + 4 > data.len() {
+                        break; // Truncated record header
+                    }
                     let marker = data[cursor];
                     cursor += 1;
 
@@ -434,6 +437,9 @@ impl DataFile {
                     let length = u32::from_le_bytes(length_buf) as usize;
                     cursor += 4;
 
+                    if cursor + length > data.len() {
+                        break; // Truncated record body
+                    }
                     if marker != TOMBSTONE_MARKER {
                         results.push(Row::from_bytes(&data[cursor..cursor+length])?);
                     }
@@ -457,62 +463,7 @@ impl DataFile {
 
     /// Scan all active rows in the file (more efficient than individual reads)
     pub fn scan_rows(&mut self) -> Result<Vec<Row>> {
-        let mut results = Vec::new();
-        let mut row_buffer = Vec::with_capacity(1024);
-
-        match &mut self.backend {
-            DataFileBackend::File(writer) => {
-                // Only flush if there are pending writes
-                if self.dirty {
-                    writer.flush()?;
-                    self.dirty = false;
-                }
-                let file = writer.get_mut();
-
-                file.seek(SeekFrom::Start(0))?;
-                loop {
-                    let mut marker = [0u8; 1];
-                    match file.read_exact(&mut marker) {
-                        Ok(_) => {}
-                        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                        Err(e) => return Err(e.into()),
-                    }
-
-                    let mut length_buf = [0u8; 4];
-                    file.read_exact(&mut length_buf)?;
-                    let length = u32::from_le_bytes(length_buf) as usize;
-
-                    if marker[0] == TOMBSTONE_MARKER {
-                        file.seek(SeekFrom::Current(length as i64))?;
-                    } else {
-                        if row_buffer.len() < length {
-                            row_buffer.resize(length, 0);
-                        }
-                        file.read_exact(&mut row_buffer[..length])?;
-                        results.push(Row::from_bytes(&row_buffer[..length])?);
-                    }
-                }
-            }
-            DataFileBackend::Memory(data) => {
-                let mut cursor = 0usize;
-                while cursor < data.len() {
-                    let marker = data[cursor];
-                    cursor += 1;
-                    
-                    let mut length_buf = [0u8; 4];
-                    length_buf.copy_from_slice(&data[cursor..cursor+4]);
-                    let length = u32::from_le_bytes(length_buf) as usize;
-                    cursor += 4;
-
-                    if marker != TOMBSTONE_MARKER {
-                        results.push(Row::from_bytes(&data[cursor..cursor+length])?);
-                    }
-                    cursor += length;
-                }
-            }
-        }
-
-        Ok(results)
+        self.scan_rows_limited(None)
     }
 
     /// Scan all rows in the file (for recovery/rebuild)

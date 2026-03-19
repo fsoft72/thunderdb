@@ -638,3 +638,38 @@ All 227 tests passing ✓
   - COUNT performance, filtered update, LIMIT query
 
 All 276 tests passing (264 unit + 12 integration, plus 11 ignored stress tests) ✓
+
+---
+
+## 2026-03-19 - Code Simplification & Bug Fixes
+
+- **Eliminated `scan_rows()` duplication** (`src/storage/data_file.rs`)
+  - `scan_rows()` now delegates to `scan_rows_limited(None)`, removing ~55 lines of duplicate logic
+
+- **Fixed `bulk_insert` active_count overcounting** (`src/storage/rat.rs`)
+  - `bulk_insert()` now checks for existing active entries before incrementing `active_count`
+  - Prevents COUNT fast-path and compaction threshold from returning wrong values on duplicate row IDs
+
+- **Fixed N+1 disk reads in `update()`** (`src/lib.rs`)
+  - `update()` now keeps the full `Row` objects from `scan()` instead of discarding and re-reading each from disk
+  - Eliminates redundant `get_by_id()` call per matched row
+
+- **Used cached column mapping in `scan_with_limit`** (`src/lib.rs`)
+  - Replaced manual `HashMap` build with `table_engine.build_column_mapping()` (uses `Arc` cache)
+  - Eliminates per-query `HashMap` allocation when cache is warm
+
+- **Removed `fetch_rows_by_ids()` wrapper** (`src/storage/table_engine.rs`)
+  - One-line delegation to `get_by_ids()` replaced with direct calls at all 5 call sites
+
+- **Fixed NaN handling in In/NotIn binary search** (`src/query/filter.rs`, `src/index/manager.rs`)
+  - Changed `partial_cmp` fallback from `Ordering::Equal` to `Ordering::Greater`/`Less`
+  - Prevents NaN values from falsely matching any probe value in binary search
+
+- **Added bounds checks in Memory backend scan** (`src/storage/data_file.rs`)
+  - `scan_rows_limited()` Memory branch now checks buffer bounds before slicing
+  - Prevents panic on truncated or corrupt in-memory data
+
+- **Fixed NodeCache comment** (`src/index/persist.rs`)
+  - Corrected misleading "O(1) amortized" claim — eviction is O(n) when cache is full
+
+All 276 tests passing ✓

@@ -305,13 +305,8 @@ impl DirectDataAccess for Database {
     ) -> Result<Vec<Row>> {
         let table_engine = self.get_table_mut(table)?;
 
-        // Build column mapping from schema if available
-        let mut column_mapping = HashMap::new();
-        if let Some(schema) = table_engine.schema() {
-            for (i, col) in schema.columns.iter().enumerate() {
-                column_mapping.insert(col.name.clone(), i);
-            }
-        }
+        // Build column mapping from schema (uses cached Arc)
+        let column_mapping = table_engine.build_column_mapping();
 
         // Collect stats for index selection
         let all_stats = table_engine.index_manager().all_stats();
@@ -395,41 +390,36 @@ impl DirectDataAccess for Database {
         filters: Vec<Filter>,
         updates: Vec<(String, Value)>,
     ) -> Result<usize> {
-        // Collect matching row_ids in a single scan pass
-        let row_ids: Vec<u64> = self.scan(table, filters)?
-            .into_iter()
-            .map(|r| r.row_id)
-            .collect();
+        // Collect matching rows in a single scan pass (keep full Row data)
+        let rows = self.scan(table, filters)?;
 
-        if row_ids.is_empty() {
+        if rows.is_empty() {
             return Ok(0);
         }
 
         let table_engine = self.get_table_mut(table)?;
         let column_mapping = table_engine.build_column_mapping();
-        let count = row_ids.len();
+        let count = rows.len();
 
-        for row_id in row_ids {
-            if let Some(mut row) = table_engine.get_by_id(row_id)? {
-                // Apply updates to row.values
-                for (col_name, new_val) in &updates {
-                    let col_idx = if let Some(&idx) = column_mapping.get(col_name) {
-                        Some(idx)
-                    } else if col_name.starts_with("col") {
-                        col_name[3..].parse::<usize>().ok()
-                    } else {
-                        None
-                    };
+        for mut row in rows {
+            // Apply updates to row.values
+            for (col_name, new_val) in &updates {
+                let col_idx = if let Some(&idx) = column_mapping.get(col_name) {
+                    Some(idx)
+                } else if col_name.starts_with("col") {
+                    col_name[3..].parse::<usize>().ok()
+                } else {
+                    None
+                };
 
-                    if let Some(idx) = col_idx {
-                        if idx < row.values.len() {
-                            row.values[idx] = new_val.clone();
-                        }
+                if let Some(idx) = col_idx {
+                    if idx < row.values.len() {
+                        row.values[idx] = new_val.clone();
                     }
                 }
-
-                table_engine.update_row(row_id, row.values)?;
             }
+
+            table_engine.update_row(row.row_id, row.values)?;
         }
 
         Ok(count)

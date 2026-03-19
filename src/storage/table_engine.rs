@@ -579,12 +579,6 @@ impl TableEngine {
         Ok(())
     }
 
-    /// Fetch rows by a list of row IDs, skipping missing/deleted entries.
-    /// Sorts by file offset for sequential I/O.
-    fn fetch_rows_by_ids(&mut self, row_ids: Vec<u64>) -> Result<Vec<Row>> {
-        self.get_by_ids(&row_ids)
-    }
-
     /// Greater than search using an index
     pub fn greater_than_by_index(
         &mut self,
@@ -593,7 +587,7 @@ impl TableEngine {
         inclusive: bool,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.greater_than(column_name, value, inclusive)?;
-        self.fetch_rows_by_ids(row_ids)
+        self.get_by_ids(&row_ids)
     }
 
     /// Less than search using an index
@@ -604,19 +598,19 @@ impl TableEngine {
         inclusive: bool,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.less_than(column_name, value, inclusive)?;
-        self.fetch_rows_by_ids(row_ids)
+        self.get_by_ids(&row_ids)
     }
 
     /// Prefix search using an index
     pub fn prefix_search_by_index(&mut self, column_name: &str, prefix: &str) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.prefix_search(column_name, prefix)?;
-        self.fetch_rows_by_ids(row_ids)
+        self.get_by_ids(&row_ids)
     }
 
     /// Search for rows matching a value using an index
     pub fn search_by_index(&mut self, column_name: &str, value: &Value) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.search(column_name, value)?;
-        self.fetch_rows_by_ids(row_ids)
+        self.get_by_ids(&row_ids)
     }
 
     /// Range search using an index
@@ -627,7 +621,7 @@ impl TableEngine {
         end_value: &Value,
     ) -> Result<Vec<Row>> {
         let row_ids = self.index_manager.range_query(column_name, start_value, end_value)?;
-        self.fetch_rows_by_ids(row_ids)
+        self.get_by_ids(&row_ids)
     }
 
     /// Build a column name -> position mapping from the schema (cached)

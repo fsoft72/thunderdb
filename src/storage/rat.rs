@@ -209,16 +209,20 @@ impl RecordAddressTable {
     /// # Arguments
     /// * `batch` - Vector of (row_id, offset, length) tuples
     pub fn bulk_insert(&mut self, batch: Vec<(u64, u64, u32)>) -> Result<()> {
-        let count = batch.len();
+        let mut added = 0usize;
         for (row_id, offset, length) in batch {
+            let was_active = self.entries.get(&row_id).map_or(false, |e| !e.deleted);
             self.entries.insert(row_id, RatEntry {
                 row_id,
                 offset,
                 length,
                 deleted: false,
             });
+            if !was_active {
+                added += 1;
+            }
         }
-        self.active_count += count;
+        self.active_count += added;
         self.dirty = true;
         Ok(())
     }
