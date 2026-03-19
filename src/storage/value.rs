@@ -5,7 +5,7 @@ use std::fmt;
 /// Supported data types in ThunderDB
 ///
 /// Each value type has a specific binary representation for efficient storage
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// 32-bit signed integer
     Int32(i32),
@@ -246,6 +246,49 @@ impl Value {
     /// Convenience constructor for Varchar values
     pub fn varchar(s: impl Into<SmallString>) -> Self {
         Value::Varchar(s.into())
+    }
+}
+
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    /// Total ordering for Value, handling NaN floats deterministically.
+    ///
+    /// Uses f32::total_cmp / f64::total_cmp so NaN sorts consistently
+    /// instead of causing panics in B-tree comparisons. Cross-variant
+    /// ordering follows declaration order (Int32 < Int64 < Float32 < ...).
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        /// Return a discriminant index for variant ordering
+        fn variant_index(v: &Value) -> u8 {
+            match v {
+                Value::Int32(_) => 0,
+                Value::Int64(_) => 1,
+                Value::Float32(_) => 2,
+                Value::Float64(_) => 3,
+                Value::Varchar(_) => 4,
+                Value::Timestamp(_) => 5,
+                Value::Null => 6,
+            }
+        }
+
+        match (self, other) {
+            (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+            (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
+            (Value::Float32(a), Value::Float32(b)) => a.total_cmp(b),
+            (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
+            (Value::Varchar(a), Value::Varchar(b)) => a.cmp(b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
+            (Value::Null, Value::Null) => Ordering::Equal,
+            _ => variant_index(self).cmp(&variant_index(other)),
+        }
     }
 }
 

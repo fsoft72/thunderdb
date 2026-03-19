@@ -2,6 +2,9 @@
 //
 // Inline storage for strings <= 23 bytes, avoiding heap allocation.
 // Most database column values (names, statuses, short IDs) fit inline.
+//
+// The internal representation is private to prevent external construction
+// of invalid UTF-8 inline values (which would cause undefined behavior).
 
 use std::fmt;
 
@@ -13,14 +16,19 @@ const INLINE_CAP: usize = 23;
 ///
 /// Strings up to 23 bytes are stored in a fixed-size array with zero
 /// heap allocation. Longer strings use a standard `String`.
+///
+/// The internal representation is private — construct via `new()`,
+/// `from_string()`, `from_utf8()`, or `From` impls.
 #[derive(Clone)]
-pub enum SmallString {
-    /// Inline storage for strings <= 23 bytes
+pub struct SmallString(SmallStringRepr);
+
+/// Private representation — cannot be constructed outside this module
+#[derive(Clone)]
+enum SmallStringRepr {
     Inline {
         data: [u8; INLINE_CAP],
         len: u8,
     },
-    /// Heap-allocated fallback for longer strings
     Heap(String),
 }
 
@@ -30,12 +38,12 @@ impl SmallString {
         if s.len() <= INLINE_CAP {
             let mut data = [0u8; INLINE_CAP];
             data[..s.len()].copy_from_slice(s.as_bytes());
-            SmallString::Inline {
+            SmallString(SmallStringRepr::Inline {
                 data,
                 len: s.len() as u8,
-            }
+            })
         } else {
-            SmallString::Heap(s.to_string())
+            SmallString(SmallStringRepr::Heap(s.to_string()))
         }
     }
 
@@ -44,12 +52,12 @@ impl SmallString {
         if s.len() <= INLINE_CAP {
             let mut data = [0u8; INLINE_CAP];
             data[..s.len()].copy_from_slice(s.as_bytes());
-            SmallString::Inline {
+            SmallString(SmallStringRepr::Inline {
                 data,
                 len: s.len() as u8,
-            }
+            })
         } else {
-            SmallString::Heap(s)
+            SmallString(SmallStringRepr::Heap(s))
         }
     }
 
@@ -61,20 +69,22 @@ impl SmallString {
 
     /// Get as string slice
     pub fn as_str(&self) -> &str {
-        match self {
-            SmallString::Inline { data, len } => {
-                // Safety: we only store valid UTF-8
+        match &self.0 {
+            SmallStringRepr::Inline { data, len } => {
+                // Safety: all constructors validate UTF-8 before storing.
+                // The inner repr is private, so external code cannot build
+                // an invalid Inline value.
                 unsafe { std::str::from_utf8_unchecked(&data[..*len as usize]) }
             }
-            SmallString::Heap(s) => s.as_str(),
+            SmallStringRepr::Heap(s) => s.as_str(),
         }
     }
 
     /// Get length in bytes
     pub fn len(&self) -> usize {
-        match self {
-            SmallString::Inline { len, .. } => *len as usize,
-            SmallString::Heap(s) => s.len(),
+        match &self.0 {
+            SmallStringRepr::Inline { len, .. } => *len as usize,
+            SmallStringRepr::Heap(s) => s.len(),
         }
     }
 
@@ -85,15 +95,15 @@ impl SmallString {
 
     /// Get as byte slice
     pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            SmallString::Inline { data, len } => &data[..*len as usize],
-            SmallString::Heap(s) => s.as_bytes(),
+        match &self.0 {
+            SmallStringRepr::Inline { data, len } => &data[..*len as usize],
+            SmallStringRepr::Heap(s) => s.as_bytes(),
         }
     }
 
     /// Check if stored inline
     pub fn is_inline(&self) -> bool {
-        matches!(self, SmallString::Inline { .. })
+        matches!(self.0, SmallStringRepr::Inline { .. })
     }
 }
 

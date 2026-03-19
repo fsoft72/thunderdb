@@ -54,7 +54,7 @@ impl TableEngine {
     /// # Returns
     /// A Result with the TableEngine if it exists, or Error::TableNotFound
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig, btree_order: usize) -> Result<Self> {
         let base_dir = base_dir.as_ref();
 
         // Check if table directory exists
@@ -77,7 +77,7 @@ impl TableEngine {
 
         // Initialize Index Manager
         let index_dir = table_dir.join("indices");
-        let mut index_manager = IndexManager::new(name, &index_dir, 100)?; // Default order 100
+        let mut index_manager = IndexManager::new(name, &index_dir, btree_order)?;
         index_manager.load()?;
 
         // Load Schema
@@ -89,8 +89,8 @@ impl TableEngine {
             None
         };
 
-        // Determine next row ID
-        let max_row_id = rat.row_ids().into_iter().max().unwrap_or(0);
+        // Determine next row ID — O(log n) via BTreeMap last key
+        let max_row_id = rat.max_row_id().unwrap_or(0);
         let next_row_id = max_row_id + 1;
 
         Ok(Self {
@@ -107,10 +107,10 @@ impl TableEngine {
     }
 
     /// Open an in-memory table
-    pub fn open_in_memory(name: &str, config: StorageConfig) -> Result<Self> {
+    pub fn open_in_memory(name: &str, config: StorageConfig, btree_order: usize) -> Result<Self> {
         let data_file = DataFile::open_in_memory()?;
         let rat = RecordAddressTable::new();
-        let index_manager = IndexManager::new(name, ":memory:", 100)?;
+        let index_manager = IndexManager::new(name, ":memory:", btree_order)?;
 
         Ok(Self {
             name: name.to_string(),
@@ -126,21 +126,21 @@ impl TableEngine {
     }
 
     /// Load a table from disk into memory
-    pub fn load_to_memory<P: AsRef<Path>>(name: &str, base_dir: P, mut config: StorageConfig) -> Result<Self> {
+    pub fn load_to_memory<P: AsRef<Path>>(name: &str, base_dir: P, mut config: StorageConfig, btree_order: usize) -> Result<Self> {
         let base_dir = base_dir.as_ref();
         let table_dir = base_dir.join(name);
 
         if ! table_dir.exists() || base_dir.to_string_lossy() == ":memory:" {
             config.in_memory = true;
-            return Self::open_in_memory(name, config);
+            return Self::open_in_memory(name, config, btree_order);
         }
 
         // Open disk-based table first to read its data
-        let mut disk_table = Self::open(name, base_dir, config.clone())?;
+        let mut disk_table = Self::open(name, base_dir, config.clone(), btree_order)?;
         
         // Create in-memory table
         config.in_memory = true;
-        let mut mem_table = Self::open_in_memory(name, config)?;
+        let mut mem_table = Self::open_in_memory(name, config, btree_order)?;
 
         // Copy schema
         if let Some(schema) = disk_table.schema() {
@@ -197,7 +197,7 @@ impl TableEngine {
     /// * `name` - Table name
     /// * `base_dir` - Base directory for database
     /// * `config` - Storage configuration
-    pub fn create<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig) -> Result<Self> {
+    pub fn create<P: AsRef<Path>>(name: &str, base_dir: P, config: StorageConfig, btree_order: usize) -> Result<Self> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let base_dir = base_dir.as_ref();
@@ -210,12 +210,12 @@ impl TableEngine {
                 std::fs::create_dir_all(table_dir.join("indices"))?;
             }
 
-            Self::open(name, base_dir, config)
+            Self::open(name, base_dir, config, btree_order)
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = base_dir;
-            Self::open_in_memory(name, config)
+            Self::open_in_memory(name, config, btree_order)
         }
     }
 
@@ -414,17 +414,23 @@ impl TableEngine {
     /// Sorts reads by file offset for sequential I/O access pattern.
     /// Skips missing/deleted rows.
     pub fn get_by_ids(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
-        // Collect (row_id, offset, length) and sort by offset for sequential I/O
-        let mut entries: Vec<(u64, u64, u32)> = Vec::with_capacity(row_ids.len());
+        self.fetch_rows_sorted_by_offset(row_ids)
+    }
+
+    /// Resolve RAT entries for the given row_ids, sort by on-disk offset,
+    /// and read rows sequentially to avoid scattered seeks.
+    fn fetch_rows_sorted_by_offset(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
+        let mut entries: Vec<(u64, u32)> = Vec::with_capacity(row_ids.len());
         for &row_id in row_ids {
             if let Some((offset, length)) = self.rat.get(row_id) {
-                entries.push((row_id, offset, length));
+                entries.push((offset, length));
             }
         }
-        entries.sort_by_key(|&(_, offset, _)| offset);
+
+        entries.sort_unstable_by_key(|&(offset, _)| offset);
 
         let mut rows = Vec::with_capacity(entries.len());
-        for (_, offset, length) in entries {
+        for (offset, length) in entries {
             if let Some(row) = self.data_file.read_row(offset, length)? {
                 rows.push(row);
             }
@@ -640,6 +646,23 @@ impl TableEngine {
         arc
     }
 
+    /// Create an index on a column and backfill it from existing rows
+    ///
+    /// Unlike calling `index_manager_mut().create_index()` directly, this
+    /// method populates the new index with all existing rows so that indexed
+    /// queries return correct results immediately.
+    pub fn create_index(&mut self, column_name: &str) -> Result<()> {
+        self.index_manager.create_index(column_name)?;
+
+        let rows = self.scan_all()?;
+        if !rows.is_empty() {
+            let mapping = self.build_column_mapping();
+            self.index_manager.rebuild_index(column_name, &rows, &mapping)?;
+        }
+
+        Ok(())
+    }
+
     /// Get index manager
     pub fn index_manager(&self) -> &IndexManager {
         &self.index_manager
@@ -739,7 +762,7 @@ mod tests {
             auto_compact: false,
         };
 
-        TableEngine::create(name, &base_dir, config).unwrap()
+        TableEngine::create(name, &base_dir, config, 100).unwrap()
     }
 
     #[test]
@@ -862,7 +885,7 @@ mod tests {
 
         // Create table and insert data
         {
-            let mut table = TableEngine::create("users", base_dir, config.clone()).unwrap();
+            let mut table = TableEngine::create("users", base_dir, config.clone(), 100).unwrap();
 
             for i in 1..=5 {
                 table
@@ -879,7 +902,7 @@ mod tests {
 
         // Reopen and verify
         {
-            let mut table = TableEngine::open("users", base_dir, config).unwrap();
+            let mut table = TableEngine::open("users", base_dir, config, 100).unwrap();
 
             assert_eq!(table.stats().total_rows, 5);
             assert_eq!(table.stats().active_rows, 4);
@@ -934,7 +957,7 @@ mod tests {
 
         // Create table and insert data
         {
-            let mut table = TableEngine::create("test", base_dir, config.clone()).unwrap();
+            let mut table = TableEngine::create("test", base_dir, config.clone(), 100).unwrap();
 
             for i in 1..=5 {
                 table.insert_row(vec![Value::Int32(i)]).unwrap();
@@ -949,7 +972,7 @@ mod tests {
 
         // Reopen and rebuild
         {
-            let mut table = TableEngine::open("test", base_dir, config).unwrap();
+            let mut table = TableEngine::open("test", base_dir, config, 100).unwrap();
 
             // RAT should be empty
             assert_eq!(table.stats().total_rows, 0);
@@ -1043,7 +1066,7 @@ mod tests {
             auto_compact: false,
         };
 
-        let mut table = TableEngine::open_in_memory("test_mem_compact", config).unwrap();
+        let mut table = TableEngine::open_in_memory("test_mem_compact", config, 100).unwrap();
 
         for i in 1..=10 {
             table.insert_row(vec![Value::Int32(i)]).unwrap();
@@ -1079,7 +1102,7 @@ mod tests {
             auto_compact: true,
         };
 
-        let mut table = TableEngine::create("test", base_dir, config).unwrap();
+        let mut table = TableEngine::create("test", base_dir, config, 100).unwrap();
 
         for i in 1..=10 {
             table.insert_row(vec![Value::Int32(i)]).unwrap();

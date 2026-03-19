@@ -30,6 +30,9 @@ pub struct IndexStatistics {
 impl IndexStatistics {
     /// Compute statistics from a B-Tree index
     ///
+    /// scan_all() returns entries sorted by key, so cardinality is computed
+    /// by counting adjacent key changes — no HashSet or format!() needed.
+    ///
     /// # Arguments
     /// * `tree` - B-Tree to analyze
     pub fn from_btree(tree: &BTree<Value, u64>) -> Self {
@@ -45,18 +48,23 @@ impl IndexStatistics {
             };
         }
 
-        // Count unique keys
-        let mut unique_keys = std::collections::HashSet::new();
-        for (key, _) in &all_entries {
-            // Use a string representation for hashing since Value doesn't implement Hash
-            unique_keys.insert(format!("{:?}", key));
-        }
-
-        let cardinality = unique_keys.len();
         let total_entries = all_entries.len();
 
-        let min_value = all_entries.first().map(|(k, _)| k.clone());
-        let max_value = all_entries.last().map(|(k, _)| k.clone());
+        // Extract keys and sort for O(n log n) cardinality counting
+        // without the heap churn of HashSet<format!("{:?}", key)>
+        let mut keys: Vec<&Value> = all_entries.iter().map(|(k, _)| k).collect();
+        keys.sort();
+
+        // Count distinct keys by comparing adjacent sorted entries
+        let mut cardinality = 1;
+        for i in 1..keys.len() {
+            if keys[i] != keys[i - 1] {
+                cardinality += 1;
+            }
+        }
+
+        let min_value = Some(keys[0].clone());
+        let max_value = Some(keys[keys.len() - 1].clone());
 
         let avg_duplicates = if cardinality > 0 {
             total_entries as f64 / cardinality as f64
@@ -108,7 +116,7 @@ impl IndexStatistics {
         match &self.min_value {
             None => self.min_value = Some(value.clone()),
             Some(min) => {
-                if value.partial_cmp(min) == Some(std::cmp::Ordering::Less) {
+                if value < min {
                     self.min_value = Some(value.clone());
                 }
             }
@@ -116,7 +124,7 @@ impl IndexStatistics {
         match &self.max_value {
             None => self.max_value = Some(value.clone()),
             Some(max) => {
-                if value.partial_cmp(max) == Some(std::cmp::Ordering::Greater) {
+                if value > max {
                     self.max_value = Some(value.clone());
                 }
             }

@@ -15,7 +15,7 @@ use std::fmt::Debug;
 #[derive(Debug, Clone)]
 pub struct BTree<K, V>
 where
-    K: Clone + PartialOrd + Debug,
+    K: Clone + Ord + Debug,
     V: Clone + Debug,
 {
     /// Root node ID
@@ -39,7 +39,7 @@ where
 
 impl<K, V> BTree<K, V>
 where
-    K: Clone + PartialOrd + Debug,
+    K: Clone + Ord + Debug,
     V: Clone + Debug + PartialEq,
 {
     /// Create a new empty B-Tree
@@ -109,7 +109,7 @@ where
         // Backtrack to find the first occurrence
         let mut start_pos = pos;
         while start_pos > 0 {
-            if leaf.keys[start_pos - 1].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal {
+            if leaf.keys[start_pos - 1].cmp(key) == std::cmp::Ordering::Equal {
                 start_pos -= 1;
             } else {
                 break;
@@ -118,7 +118,7 @@ where
 
         // Collect all matching values
         for i in start_pos..leaf.keys.len() {
-            if leaf.keys[i].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal {
+            if leaf.keys[i].cmp(key) == std::cmp::Ordering::Equal {
                 results.push(leaf.values[i].clone());
             } else {
                 break;
@@ -153,11 +153,11 @@ where
                 let key = &leaf.keys[i];
 
                 // Check if key is in range
-                if key.partial_cmp(start_key).unwrap() >= std::cmp::Ordering::Equal
-                    && key.partial_cmp(end_key).unwrap() <= std::cmp::Ordering::Equal
+                if key.cmp(start_key) >= std::cmp::Ordering::Equal
+                    && key.cmp(end_key) <= std::cmp::Ordering::Equal
                 {
                     results.push((key.clone(), leaf.values[i].clone()));
-                } else if key.partial_cmp(end_key).unwrap() > std::cmp::Ordering::Equal {
+                } else if key.cmp(end_key) > std::cmp::Ordering::Equal {
                     // Past the end, we're done
                     return results;
                 }
@@ -186,7 +186,7 @@ where
 
             for i in 0..leaf.keys.len() {
                 let key = &leaf.keys[i];
-                if key.partial_cmp(start_key).unwrap() >= std::cmp::Ordering::Equal {
+                if key.cmp(start_key) >= std::cmp::Ordering::Equal {
                     results.push((key.clone(), leaf.values[i].clone()));
                 }
             }
@@ -215,7 +215,7 @@ where
 
             for i in 0..leaf.keys.len() {
                 let key = &leaf.keys[i];
-                if key.partial_cmp(end_key).unwrap() <= std::cmp::Ordering::Equal {
+                if key.cmp(end_key) <= std::cmp::Ordering::Equal {
                     results.push((key.clone(), leaf.values[i].clone()));
                 } else {
                     return results; // Past the end
@@ -282,7 +282,7 @@ where
             let pos = node.find_position(key);
 
             let mut child_idx = pos;
-            if pos < node.keys.len() && node.keys[pos].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal {
+            if pos < node.keys.len() && node.keys[pos].cmp(key) == std::cmp::Ordering::Equal {
                 child_idx = pos + 1;
             }
 
@@ -306,7 +306,7 @@ where
 
         // Insert the new key-value pair into appropriate node
         {
-            let target_id = match key.partial_cmp(&middle_key).unwrap() {
+            let target_id = match key.cmp(&middle_key) {
                 std::cmp::Ordering::Less => leaf_id,
                 _ => new_node_id,
             };
@@ -366,7 +366,7 @@ where
 
         // Insert the new key into appropriate node
         {
-            let target_id = match key.partial_cmp(&middle_key).unwrap() {
+            let target_id = match key.cmp(&middle_key) {
                 std::cmp::Ordering::Less => node_id,
                 _ => new_node_id,
             };
@@ -420,7 +420,7 @@ where
 
         // Scan for matching key+value pair
         for i in 0..leaf.keys.len() {
-            if leaf.keys[i].partial_cmp(key).unwrap() == std::cmp::Ordering::Equal
+            if leaf.keys[i].cmp(key) == std::cmp::Ordering::Equal
                 && leaf.values[i] == *value
             {
                 leaf.keys.remove(i);

@@ -299,7 +299,7 @@ fn read_optional_u64(file: &mut File) -> Result<Option<u64>> {
 /// the lowest generation is removed.
 pub struct NodeCache<K, V>
 where
-    K: Clone + PartialOrd + std::fmt::Debug,
+    K: Clone + Ord + std::fmt::Debug,
     V: Clone + std::fmt::Debug,
 {
     cache: HashMap<u64, (BTreeNode<K, V>, u64)>,
@@ -309,7 +309,7 @@ where
 
 impl<K, V> NodeCache<K, V>
 where
-    K: Clone + PartialOrd + std::fmt::Debug,
+    K: Clone + Ord + std::fmt::Debug,
     V: Clone + std::fmt::Debug,
 {
     /// Create a new node cache with given capacity

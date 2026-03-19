@@ -209,7 +209,7 @@ impl IndexManager {
             let results = index.scan_from(value);
             let mut row_ids = Vec::new();
             for (key, row_id) in results {
-                if inclusive || key.partial_cmp(value).unwrap() > std::cmp::Ordering::Equal {
+                if inclusive || key.cmp(value) > std::cmp::Ordering::Equal {
                     row_ids.push(row_id);
                 }
             }
@@ -225,7 +225,7 @@ impl IndexManager {
             let results = index.scan_to(value);
             let mut row_ids = Vec::new();
             for (key, row_id) in results {
-                if inclusive || key.partial_cmp(value).unwrap() < std::cmp::Ordering::Equal {
+                if inclusive || key.cmp(value) < std::cmp::Ordering::Equal {
                     row_ids.push(row_id);
                 }
             }
@@ -246,7 +246,7 @@ impl IndexManager {
                 let results = index.range_scan(&start_val, &end_val);
                 // Filter out the 'end' boundary which is exclusive for prefix matches
                 Ok(results.into_iter()
-                    .filter(|(k, _)| k.partial_cmp(&end_val).unwrap() < std::cmp::Ordering::Equal)
+                    .filter(|(k, _)| k.cmp(&end_val) < std::cmp::Ordering::Equal)
                     .map(|(_, row_id)| row_id)
                     .collect())
             } else {

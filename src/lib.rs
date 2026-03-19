@@ -120,19 +120,20 @@ impl Database {
     /// table doesn't exist. When true, creates it on the fly.
     fn load_table(&mut self, name: &str, create_if_missing: bool) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
+            let btree_order = self.config.index.btree_order;
             let table = if self.config.storage.in_memory {
-                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone())?
+                TableEngine::load_to_memory(name, &self.data_dir, self.config.storage.clone(), btree_order)?
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     if create_if_missing {
-                        TableEngine::create(name, &self.data_dir, self.config.storage.clone())?
+                        TableEngine::create(name, &self.data_dir, self.config.storage.clone(), btree_order)?
                     } else {
-                        TableEngine::open(name, &self.data_dir, self.config.storage.clone())?
+                        TableEngine::open(name, &self.data_dir, self.config.storage.clone(), btree_order)?
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
-                { TableEngine::open_in_memory(name, self.config.storage.clone())? }
+                { TableEngine::open_in_memory(name, self.config.storage.clone(), btree_order)? }
             };
             self.tables.insert(name.to_string(), table);
         }
