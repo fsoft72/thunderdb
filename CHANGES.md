@@ -1,5 +1,17 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Implement JOIN execution in REPL
+
+- `execute_join()` method handles SELECT with JOIN via hash join (BTreeMap, since Value lacks Hash)
+- `flatten_joins()` converts recursive FromClause tree into base table + ordered JoinStep list
+- `build_join_column_mapping()` maps qualified (`table.col`) and bare column names to merged-row positions
+- `partition_filters()` pushes WHERE filters down to individual table scans when possible, keeps remainder for post-join
+- `hash_join()` supports INNER, LEFT, and RIGHT joins with null-padding for outer joins
+- COUNT(*) with JOIN executes the join pipeline and counts results
+- SELECT * with JOIN produces prefixed column headers (`table.col`)
+- ORDER BY, LIMIT/OFFSET, and column projection all work on joined result sets
+- File changed: `src/repl/mod.rs`
+
 ## 2026-03-26 - Parse FROM clause with JOIN/LEFT/RIGHT, dot-qualified columns
 
 - `parse_from_clause()` replaces inline FROM parsing; handles JOIN chains with ON conditions

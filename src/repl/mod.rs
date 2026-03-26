@@ -6,11 +6,13 @@ pub mod commands;
 pub mod formatter;
 
 use crate::error::Result;
+use crate::parser::ast::{FromClause, JoinType, ColumnRef, TableRef};
 use crate::parser::{Statement, Executor};
 use crate::query::DirectDataAccess;
 use crate::repl::commands::{parse_special_command, SpecialCommand};
 use crate::repl::formatter::format_results;
 use crate::Database;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 #[cfg(feature = "repl")]
@@ -25,6 +27,174 @@ pub struct Repl<'a> {
     database: &'a mut Database,
     #[cfg(feature = "repl")]
     editor: DefaultEditor,
+}
+
+/// Flattened join step
+struct JoinStep {
+    join_type: JoinType,
+    right: TableRef,
+    on_left: ColumnRef,
+    on_right: ColumnRef,
+}
+
+/// Flatten a FromClause join tree into base table + ordered join steps
+fn flatten_joins(from: &FromClause) -> (TableRef, Vec<JoinStep>) {
+    match from {
+        FromClause::Table(t) => (t.clone(), vec![]),
+        FromClause::Join { left, join_type, right, on_left, on_right } => {
+            let (base, mut steps) = flatten_joins(left);
+            steps.push(JoinStep {
+                join_type: join_type.clone(),
+                right: right.clone(),
+                on_left: on_left.clone(),
+                on_right: on_right.clone(),
+            });
+            (base, steps)
+        }
+    }
+}
+
+/// Build column mapping for joined tables.
+/// Maps both "alias.col" and bare "col" (if unambiguous) to position in merged row.
+fn build_join_column_mapping(
+    tables: &[(String, Option<String>, Vec<String>)],
+) -> HashMap<String, usize> {
+    let mut mapping = HashMap::new();
+    let mut bare_count: HashMap<String, usize> = HashMap::new();
+    let mut bare_pos: HashMap<String, usize> = HashMap::new();
+    let mut offset = 0usize;
+
+    for (name, alias, columns) in tables {
+        let qualifier = alias.as_deref().unwrap_or(name.as_str());
+        for (i, col) in columns.iter().enumerate() {
+            let pos = offset + i;
+            mapping.insert(format!("{}.{}", qualifier, col), pos);
+            *bare_count.entry(col.clone()).or_insert(0) += 1;
+            bare_pos.insert(col.clone(), pos);
+        }
+        offset += columns.len();
+    }
+
+    for (col, count) in &bare_count {
+        if *count == 1 {
+            if let Some(&pos) = bare_pos.get(col) {
+                mapping.insert(col.clone(), pos);
+            }
+        }
+    }
+
+    mapping
+}
+
+/// Partition WHERE filters into per-table pushdowns and post-join filters.
+fn partition_filters(
+    where_clause: &Option<crate::parser::ast::Expression>,
+    tables: &[(String, Option<String>, Vec<String>)],
+) -> crate::error::Result<(HashMap<String, Vec<crate::query::Filter>>, Vec<crate::query::Filter>)> {
+    use crate::parser::Executor;
+    use crate::query::Filter;
+
+    let mut pushdowns: HashMap<String, Vec<Filter>> = HashMap::new();
+    let mut post_join: Vec<Filter> = Vec::new();
+
+    let filters = if let Some(expr) = where_clause {
+        Executor::expression_to_filters(expr)?
+    } else {
+        return Ok((pushdowns, post_join));
+    };
+
+    for filter in filters {
+        if let Some(dot_pos) = filter.column.find('.') {
+            let qualifier = &filter.column[..dot_pos];
+            let bare_col = &filter.column[dot_pos + 1..];
+            let table_name = tables.iter()
+                .find(|(name, alias, _)| {
+                    alias.as_deref() == Some(qualifier) || name == qualifier
+                })
+                .map(|(name, _, _)| name.clone());
+
+            if let Some(name) = table_name {
+                pushdowns.entry(name).or_default()
+                    .push(Filter::new(bare_col.to_string(), filter.operator.clone()));
+            } else {
+                post_join.push(filter);
+            }
+        } else {
+            let mut found_table = None;
+            let mut ambiguous = false;
+            for (name, _, columns) in tables {
+                if columns.contains(&filter.column) {
+                    if found_table.is_some() {
+                        ambiguous = true;
+                        break;
+                    }
+                    found_table = Some(name.clone());
+                }
+            }
+            if ambiguous || found_table.is_none() {
+                post_join.push(filter);
+            } else {
+                pushdowns.entry(found_table.unwrap()).or_default().push(filter);
+            }
+        }
+    }
+
+    Ok((pushdowns, post_join))
+}
+
+/// Perform a hash join between left and right row sets.
+///
+/// Uses BTreeMap since Value implements Ord but not Hash.
+fn hash_join(
+    left_rows: &[crate::storage::Row],
+    right_rows: &[crate::storage::Row],
+    left_col_idx: usize,
+    right_col_idx: usize,
+    join_type: &JoinType,
+    left_col_count: usize,
+    right_col_count: usize,
+) -> Vec<crate::storage::Row> {
+    use crate::storage::{Row, Value};
+
+    let mut right_map: BTreeMap<Value, Vec<usize>> = BTreeMap::new();
+    for (i, row) in right_rows.iter().enumerate() {
+        if let Some(val) = row.values.get(right_col_idx) {
+            right_map.entry(val.clone()).or_default().push(i);
+        }
+    }
+
+    let mut results = Vec::new();
+    let mut right_matched = vec![false; right_rows.len()];
+
+    for left_row in left_rows {
+        let left_val = left_row.values.get(left_col_idx);
+        let matches = left_val.and_then(|v| right_map.get(v));
+
+        if let Some(indices) = matches {
+            for &ri in indices {
+                right_matched[ri] = true;
+                let mut values = left_row.values.clone();
+                values.extend(right_rows[ri].values.clone());
+                results.push(Row { row_id: left_row.row_id, values });
+            }
+        } else if matches!(join_type, JoinType::Left) {
+            let mut values = left_row.values.clone();
+            values.extend(std::iter::repeat(Value::Null).take(right_col_count));
+            results.push(Row { row_id: left_row.row_id, values });
+        }
+    }
+
+    if matches!(join_type, JoinType::Right) {
+        for (i, matched) in right_matched.iter().enumerate() {
+            if !matched {
+                let mut values: Vec<Value> = std::iter::repeat(Value::Null).take(left_col_count).collect();
+                values.extend(right_rows[i].values.clone());
+                results.push(Row { row_id: right_rows[i].row_id, values });
+            }
+        }
+    }
+
+    results
 }
 
 impl<'a> Repl<'a> {
@@ -209,12 +379,21 @@ impl<'a> Repl<'a> {
             Statement::Select(select) => {
                 // COUNT(*) short-circuit: use the fast count path
                 if select.is_count_star() {
-                    let filters = Executor::get_where_filters(&select.where_clause)?;
-                    let count = self.database.count(select.from.base_table_name(), filters)?;
-                    println!("COUNT(*)");
-                    println!("--------");
-                    println!("{}", count);
-                    println!("1 row(s)");
+                    if select.from.is_single_table() {
+                        let filters = Executor::get_where_filters(&select.where_clause)?;
+                        let count = self.database.count(select.from.base_table_name(), filters)?;
+                        println!("COUNT(*)");
+                        println!("--------");
+                        println!("{}", count);
+                        println!("1 row(s)");
+                    } else {
+                        // For joins, execute the join and count results
+                        let rows = self.execute_join(select)?;
+                        println!("COUNT(*)");
+                        println!("--------");
+                        println!("{}", rows.len());
+                        println!("1 row(s)");
+                    }
                     return Ok(());
                 }
 
@@ -222,10 +401,39 @@ impl<'a> Repl<'a> {
 
                 // Get column names
                 let column_names = if select.is_select_star() {
-                    // Try to get from table schema
-                    if let Some(table) = self.database.get_table(select.from.base_table_name()) {
-                        if let Some(schema) = table.schema() {
-                            schema.columns.iter().map(|c| c.name.clone()).collect()
+                    if !select.from.is_single_table() {
+                        // For joins, build column names from all table schemas
+                        let (base, steps) = flatten_joins(&select.from);
+                        let mut names = Vec::new();
+                        let mut add_table_cols = |db: &crate::Database, table_name: &str, alias: Option<&str>| {
+                            let prefix = alias.unwrap_or(table_name);
+                            if let Some(t) = db.get_table(table_name) {
+                                if let Some(schema) = t.schema() {
+                                    for col in &schema.columns {
+                                        names.push(format!("{}.{}", prefix, col.name));
+                                    }
+                                    return;
+                                }
+                            }
+                            names.push(format!("{}.?", prefix));
+                        };
+                        add_table_cols(&self.database, &base.name, base.alias.as_deref());
+                        for step in &steps {
+                            add_table_cols(&self.database, &step.right.name, step.right.alias.as_deref());
+                        }
+                        names
+                    } else {
+                        // Existing single-table logic
+                        if let Some(table) = self.database.get_table(select.from.base_table_name()) {
+                            if let Some(schema) = table.schema() {
+                                schema.columns.iter().map(|c| c.name.clone()).collect()
+                            } else if let Some(first_row) = rows.first() {
+                                (0..first_row.values.len())
+                                    .map(|i| format!("col{}", i))
+                                    .collect()
+                            } else {
+                                vec![]
+                            }
                         } else if let Some(first_row) = rows.first() {
                             (0..first_row.values.len())
                                 .map(|i| format!("col{}", i))
@@ -233,12 +441,6 @@ impl<'a> Repl<'a> {
                         } else {
                             vec![]
                         }
-                    } else if let Some(first_row) = rows.first() {
-                        (0..first_row.values.len())
-                            .map(|i| format!("col{}", i))
-                            .collect()
-                    } else {
-                        vec![]
                     }
                 } else {
                     select.get_column_names()
@@ -316,12 +518,149 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Execute a SELECT with JOIN
+    fn execute_join(&mut self, select: &crate::parser::SelectStatement) -> crate::error::Result<Vec<crate::storage::Row>> {
+        use crate::query::DirectDataAccess;
+        use crate::parser::ast::SelectColumn;
+
+        let (base_table, join_steps) = flatten_joins(&select.from);
+
+        // Collect table metadata: (name, alias, column_names)
+        let mut table_info: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
+
+        let get_columns = |db: &crate::Database, name: &str| -> Vec<String> {
+            if let Some(t) = db.get_table(name) {
+                if let Some(schema) = t.schema() {
+                    return schema.columns.iter().map(|c| c.name.clone()).collect();
+                }
+            }
+            vec![]
+        };
+
+        let base_cols = get_columns(&self.database, &base_table.name);
+        table_info.push((base_table.name.clone(), base_table.alias.clone(), base_cols));
+
+        for step in &join_steps {
+            let cols = get_columns(&self.database, &step.right.name);
+            table_info.push((step.right.name.clone(), step.right.alias.clone(), cols));
+        }
+
+        let column_mapping = build_join_column_mapping(&table_info);
+
+        let (pushdowns, post_join_filters) = partition_filters(&select.where_clause, &table_info)?;
+
+        // Scan base table
+        let base_filters = pushdowns.get(&base_table.name).cloned().unwrap_or_default();
+        let mut current_rows = self.database.scan(&base_table.name, base_filters)?;
+        let mut current_col_count = table_info[0].2.len();
+
+        // Execute each join step
+        for (i, step) in join_steps.iter().enumerate() {
+            let right_info = &table_info[i + 1];
+            let right_filters = pushdowns.get(&step.right.name).cloned().unwrap_or_default();
+            let right_rows = self.database.scan(&step.right.name, right_filters)?;
+            let right_col_count = right_info.2.len();
+
+            // Resolve ON column indices
+            let left_key = if let Some(ref tbl) = step.on_left.table {
+                format!("{}.{}", tbl, step.on_left.column)
+            } else {
+                step.on_left.column.clone()
+            };
+
+            let left_col_idx = column_mapping.get(&left_key)
+                .copied()
+                .ok_or_else(|| crate::error::Error::Query(
+                    format!("Column '{}' not found in join", left_key)
+                ))?;
+
+            // Right column index is relative to the right table (not merged row)
+            let right_col_idx = right_info.2.iter()
+                .position(|c| c == &step.on_right.column)
+                .ok_or_else(|| crate::error::Error::Query(
+                    format!("Column '{}' not found in table '{}'", step.on_right.column, step.right.name)
+                ))?;
+
+            current_rows = hash_join(
+                &current_rows, &right_rows,
+                left_col_idx, right_col_idx,
+                &step.join_type,
+                current_col_count, right_col_count,
+            );
+            current_col_count += right_col_count;
+        }
+
+        // Apply post-join WHERE filters
+        if !post_join_filters.is_empty() {
+            current_rows.retain(|row| {
+                crate::query::direct::apply_filters(row, &post_join_filters, &column_mapping)
+            });
+        }
+
+        // Apply ORDER BY
+        if let Some(ref order_by) = select.order_by {
+            if let Some(&col_idx) = column_mapping.get(&order_by.column) {
+                let desc = order_by.direction == crate::parser::ast::OrderDirection::Desc;
+                current_rows.sort_by(|a, b| {
+                    let va = a.values.get(col_idx);
+                    let vb = b.values.get(col_idx);
+                    let cmp = match (va, vb) {
+                        (Some(a), Some(b)) => a.cmp(b),
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    };
+                    if desc { cmp.reverse() } else { cmp }
+                });
+            }
+        }
+
+        // Apply LIMIT/OFFSET
+        if let Some(offset) = select.offset {
+            current_rows = current_rows.into_iter().skip(offset).collect();
+        }
+        if let Some(limit) = select.limit {
+            current_rows.truncate(limit);
+        }
+
+        // Apply SELECT projection
+        if !select.is_select_star() && !select.is_count_star() {
+            let select_indices: Vec<usize> = select.columns.iter().filter_map(|col| {
+                match col {
+                    SelectColumn::Column(name) => column_mapping.get(name).copied(),
+                    SelectColumn::QualifiedColumn(table, col) => {
+                        let key = format!("{}.{}", table, col);
+                        column_mapping.get(&key).copied()
+                    }
+                    SelectColumn::ColumnWithAlias(name, _) => column_mapping.get(name).copied(),
+                    _ => None,
+                }
+            }).collect();
+
+            if !select_indices.is_empty() {
+                current_rows = current_rows.into_iter().map(|row| {
+                    let new_values: Vec<crate::storage::Value> = select_indices.iter()
+                        .filter_map(|&idx| row.values.get(idx).cloned())
+                        .collect();
+                    crate::storage::Row { row_id: row.row_id, values: new_values }
+                }).collect();
+            }
+        }
+
+        Ok(current_rows)
+    }
+
     /// Execute a SELECT statement
     ///
     /// Handles ORDER BY, column projection, LIMIT, and OFFSET.
     /// When ORDER BY is present, all matching rows are fetched first so
     /// they can be sorted before pagination is applied.
     fn execute_select(&mut self, select: &crate::parser::SelectStatement) -> Result<Vec<crate::storage::Row>> {
+        // Dispatch to join path if FROM clause contains joins
+        if !select.from.is_single_table() {
+            return self.execute_join(select);
+        }
+
         let query = Executor::select_to_query(select);
         let has_ordering = query.get_order_by().is_some();
         let has_projection = query.get_columns().is_some();
