@@ -39,8 +39,9 @@ impl Validator {
             Statement::ShowTables => Ok(()), // No validation needed
             Statement::ShowDatabases => Ok(()), // No validation needed
             Statement::Use(_) => Ok(()), // No validation needed - database path is checked at runtime
-            Statement::CreateTable(_) => Ok(()), // Basic structural validation done by parser
-            Statement::DropTable(_) => Ok(()), // Basic structural validation done by parser
+            Statement::CreateTable(_) => Ok(()),
+            Statement::CreateIndex(_) => Ok(()),
+            Statement::DropTable(_) => Ok(()),
         }
     }
 

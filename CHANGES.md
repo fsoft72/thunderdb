@@ -1,5 +1,12 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Add CREATE INDEX and SELECT COUNT(*) to SQL
+
+- `CREATE INDEX idx_name ON table (column)` — creates a B-tree index with automatic backfill
+- `SELECT COUNT(*) FROM table [WHERE ...]` — uses the fast O(1) count path when unfiltered
+- New tokens: INDEX, ON
+- New AST types: CreateIndexStatement, SelectColumn::CountStar
+
 ## 2026-03-26 - Fix B-tree search for duplicate keys spanning leaf boundaries
 
 - `BTree::search()` now follows the `next_leaf` chain to collect all matching entries

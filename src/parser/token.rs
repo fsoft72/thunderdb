@@ -39,6 +39,8 @@ pub enum Token {
     Create,
     Table,
     Drop,
+    Index,
+    On,
 
     // Operators
     Equals,           // =
@@ -339,6 +341,8 @@ impl Tokenizer {
             "CREATE" => Token::Create,
             "TABLE" => Token::Table,
             "DROP" => Token::Drop,
+            "INDEX" => Token::Index,
+            "ON" => Token::On,
             _ => Token::Identifier(value),
         }
     }

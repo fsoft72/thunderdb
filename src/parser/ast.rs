@@ -15,6 +15,7 @@ pub enum Statement {
     ShowDatabases,
     Use(String),
     CreateTable(CreateTableStatement),
+    CreateIndex(CreateIndexStatement),
     DropTable(String),
 }
 
@@ -23,6 +24,14 @@ pub enum Statement {
 pub struct CreateTableStatement {
     pub name: String,
     pub columns: Vec<ColumnDefinition>,
+}
+
+/// CREATE INDEX statement
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndexStatement {
+    pub index_name: String,
+    pub table: String,
+    pub column: String,
 }
 
 /// Column definition in CREATE TABLE
@@ -68,6 +77,8 @@ pub enum SelectColumn {
     Column(String),
     /// Column with alias (column AS alias)
     ColumnWithAlias(String, String),
+    /// COUNT(*)
+    CountStar,
 }
 
 /// ORDER BY clause
@@ -203,6 +214,7 @@ impl Statement {
             Statement::ShowDatabases => "SHOW DATABASES",
             Statement::Use(_) => "USE",
             Statement::CreateTable(_) => "CREATE TABLE",
+            Statement::CreateIndex(_) => "CREATE INDEX",
             Statement::DropTable(_) => "DROP TABLE",
         }
     }
@@ -214,14 +226,19 @@ impl SelectStatement {
         self.columns.len() == 1 && matches!(self.columns[0], SelectColumn::Star)
     }
 
-    /// Get column names (excluding *)
+    /// Check if this is SELECT COUNT(*)
+    pub fn is_count_star(&self) -> bool {
+        self.columns.len() == 1 && matches!(self.columns[0], SelectColumn::CountStar)
+    }
+
+    /// Get column names (excluding * and COUNT(*))
     pub fn get_column_names(&self) -> Vec<String> {
         self.columns
             .iter()
             .filter_map(|col| match col {
                 SelectColumn::Column(name) => Some(name.clone()),
                 SelectColumn::ColumnWithAlias(name, _) => Some(name.clone()),
-                SelectColumn::Star => None,
+                SelectColumn::Star | SelectColumn::CountStar => None,
             })
             .collect()
     }

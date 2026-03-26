@@ -118,6 +118,8 @@ impl Parser {
     }
 
     /// Parse SELECT columns
+    ///
+    /// Handles *, column names, column AS alias, and COUNT(*)
     fn parse_select_columns(&mut self) -> Result<Vec<SelectColumn>> {
         let mut columns = Vec::new();
 
@@ -129,8 +131,12 @@ impl Parser {
         loop {
             let col_name = self.expect_identifier()?;
 
-            // Check for AS alias
-            if self.match_token(&Token::As) {
+            // Check for function call syntax: identifier(...)
+            if col_name.to_uppercase() == "COUNT" && self.match_token(&Token::LeftParen) {
+                self.expect(Token::Star)?;
+                self.expect(Token::RightParen)?;
+                columns.push(SelectColumn::CountStar);
+            } else if self.match_token(&Token::As) {
                 let alias = self.expect_identifier()?;
                 columns.push(SelectColumn::ColumnWithAlias(col_name, alias));
             } else {
@@ -277,8 +283,9 @@ impl Parser {
 
         match self.current() {
             Token::Table => self.parse_create_table(),
+            Token::Index => self.parse_create_index(),
             _ => Err(Error::Parser(format!(
-                "Expected TABLE after CREATE, got {:?}",
+                "Expected TABLE or INDEX after CREATE, got {:?}",
                 self.current()
             ))),
         }
@@ -310,6 +317,26 @@ impl Parser {
         self.expect(Token::RightParen)?;
 
         Ok(Statement::CreateTable(CreateTableStatement { name, columns }))
+    }
+
+    /// Parse CREATE INDEX statement
+    ///
+    /// Syntax: CREATE INDEX index_name ON table_name (column_name)
+    fn parse_create_index(&mut self) -> Result<Statement> {
+        self.expect(Token::Index)?;
+
+        let index_name = self.expect_identifier()?;
+        self.expect(Token::On)?;
+        let table = self.expect_identifier()?;
+        self.expect(Token::LeftParen)?;
+        let column = self.expect_identifier()?;
+        self.expect(Token::RightParen)?;
+
+        Ok(Statement::CreateIndex(CreateIndexStatement {
+            index_name,
+            table,
+            column,
+        }))
     }
 
     /// Parse data type

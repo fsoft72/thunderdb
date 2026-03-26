@@ -207,6 +207,17 @@ impl<'a> Repl<'a> {
     fn execute_statement(&mut self, stmt: &Statement) -> Result<()> {
         match stmt {
             Statement::Select(select) => {
+                // COUNT(*) short-circuit: use the fast count path
+                if select.is_count_star() {
+                    let filters = Executor::get_where_filters(&select.where_clause)?;
+                    let count = self.database.count(&select.from, filters)?;
+                    println!("COUNT(*)");
+                    println!("--------");
+                    println!("{}", count);
+                    println!("1 row(s)");
+                    return Ok(());
+                }
+
                 let rows = self.execute_select(select)?;
 
                 // Get column names
@@ -288,6 +299,12 @@ impl<'a> Repl<'a> {
                 table_engine.set_schema(crate::storage::table_engine::TableSchema { columns })?;
                 self.database.clear_statement_cache();
                 println!("Table created: {}", create.name);
+                Ok(())
+            }
+            Statement::CreateIndex(create_index) => {
+                let table_engine = self.database.get_table_mut(&create_index.table)?;
+                table_engine.create_index(&create_index.column)?;
+                println!("Index created: {} on {}.{}", create_index.index_name, create_index.table, create_index.column);
                 Ok(())
             }
             Statement::DropTable(table) => {
