@@ -251,6 +251,21 @@ impl Value {
 
 impl Eq for Value {}
 
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Int32(v) => v.hash(state),
+            Value::Int64(v) => v.hash(state),
+            Value::Float32(v) => v.to_bits().hash(state),
+            Value::Float64(v) => v.to_bits().hash(state),
+            Value::Varchar(v) => v.hash(state),
+            Value::Timestamp(v) => v.hash(state),
+            Value::Null => {}
+        }
+    }
+}
+
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))

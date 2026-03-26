@@ -12,7 +12,7 @@ use crate::query::DirectDataAccess;
 use crate::repl::commands::{parse_special_command, SpecialCommand};
 use crate::repl::formatter::format_results;
 use crate::Database;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Instant;
 
 #[cfg(feature = "repl")]
@@ -52,6 +52,16 @@ fn flatten_joins(from: &FromClause) -> (TableRef, Vec<JoinStep>) {
             (base, steps)
         }
     }
+}
+
+/// Get column names for a table from its schema.
+fn get_table_columns(db: &crate::Database, name: &str) -> Vec<String> {
+    if let Some(t) = db.get_table(name) {
+        if let Some(schema) = t.schema() {
+            return schema.columns.iter().map(|c| c.name.clone()).collect();
+        }
+    }
+    vec![]
 }
 
 /// Build column mapping for joined tables.
@@ -143,8 +153,6 @@ fn partition_filters(
 }
 
 /// Perform a hash join between left and right row sets.
-///
-/// Uses BTreeMap since Value implements Ord but not Hash.
 fn hash_join(
     left_rows: &[crate::storage::Row],
     right_rows: &[crate::storage::Row],
@@ -156,7 +164,7 @@ fn hash_join(
 ) -> Vec<crate::storage::Row> {
     use crate::storage::{Row, Value};
 
-    let mut right_map: BTreeMap<Value, Vec<usize>> = BTreeMap::new();
+    let mut right_map: HashMap<Value, Vec<usize>> = HashMap::new();
     for (i, row) in right_rows.iter().enumerate() {
         if let Some(val) = row.values.get(right_col_idx) {
             right_map.entry(val.clone()).or_default().push(i);
@@ -164,7 +172,12 @@ fn hash_join(
     }
 
     let mut results = Vec::new();
-    let mut right_matched = vec![false; right_rows.len()];
+    // Only track matched right rows for RIGHT JOIN
+    let mut right_matched = if matches!(join_type, JoinType::Right) {
+        vec![false; right_rows.len()]
+    } else {
+        vec![]
+    };
 
     for left_row in left_rows {
         let left_val = left_row.values.get(left_col_idx);
@@ -172,7 +185,9 @@ fn hash_join(
 
         if let Some(indices) = matches {
             for &ri in indices {
-                right_matched[ri] = true;
+                if !right_matched.is_empty() {
+                    right_matched[ri] = true;
+                }
                 let mut values = left_row.values.clone();
                 values.extend(right_rows[ri].values.clone());
                 results.push(Row { row_id: left_row.row_id, values });
@@ -377,23 +392,15 @@ impl<'a> Repl<'a> {
     fn execute_statement(&mut self, stmt: &Statement) -> Result<()> {
         match stmt {
             Statement::Select(select) => {
-                // COUNT(*) short-circuit: use the fast count path
+                // COUNT(*) short-circuit
                 if select.is_count_star() {
-                    if select.from.is_single_table() {
+                    let count = if select.from.is_single_table() {
                         let filters = Executor::get_where_filters(&select.where_clause)?;
-                        let count = self.database.count(select.from.base_table_name(), filters)?;
-                        println!("COUNT(*)");
-                        println!("--------");
-                        println!("{}", count);
-                        println!("1 row(s)");
+                        self.database.count(select.from.base_table_name(), filters)?
                     } else {
-                        // For joins, execute the join and count results
-                        let rows = self.execute_join(select)?;
-                        println!("COUNT(*)");
-                        println!("--------");
-                        println!("{}", rows.len());
-                        println!("1 row(s)");
-                    }
+                        self.execute_join(select)?.len()
+                    };
+                    println!("COUNT(*)\n--------\n{}\n1 row(s)", count);
                     return Ok(());
                 }
 
@@ -402,24 +409,23 @@ impl<'a> Repl<'a> {
                 // Get column names
                 let column_names = if select.is_select_star() {
                     if !select.from.is_single_table() {
-                        // For joins, build column names from all table schemas
+                        // For joins, build qualified column names from all table schemas
                         let (base, steps) = flatten_joins(&select.from);
                         let mut names = Vec::new();
-                        let mut add_table_cols = |db: &crate::Database, table_name: &str, alias: Option<&str>| {
-                            let prefix = alias.unwrap_or(table_name);
-                            if let Some(t) = db.get_table(table_name) {
-                                if let Some(schema) = t.schema() {
-                                    for col in &schema.columns {
-                                        names.push(format!("{}.{}", prefix, col.name));
-                                    }
-                                    return;
+                        let mut add_cols = |name: &str, alias: Option<&str>| {
+                            let prefix = alias.unwrap_or(name);
+                            let cols = get_table_columns(&self.database, name);
+                            if cols.is_empty() {
+                                names.push(format!("{}.?", prefix));
+                            } else {
+                                for col in cols {
+                                    names.push(format!("{}.{}", prefix, col));
                                 }
                             }
-                            names.push(format!("{}.?", prefix));
                         };
-                        add_table_cols(&self.database, &base.name, base.alias.as_deref());
+                        add_cols(&base.name, base.alias.as_deref());
                         for step in &steps {
-                            add_table_cols(&self.database, &step.right.name, step.right.alias.as_deref());
+                            add_cols(&step.right.name, step.right.alias.as_deref());
                         }
                         names
                     } else {
@@ -520,7 +526,6 @@ impl<'a> Repl<'a> {
 
     /// Execute a SELECT with JOIN
     fn execute_join(&mut self, select: &crate::parser::SelectStatement) -> crate::error::Result<Vec<crate::storage::Row>> {
-        use crate::query::DirectDataAccess;
         use crate::parser::ast::SelectColumn;
 
         let (base_table, join_steps) = flatten_joins(&select.from);
@@ -528,20 +533,11 @@ impl<'a> Repl<'a> {
         // Collect table metadata: (name, alias, column_names)
         let mut table_info: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
 
-        let get_columns = |db: &crate::Database, name: &str| -> Vec<String> {
-            if let Some(t) = db.get_table(name) {
-                if let Some(schema) = t.schema() {
-                    return schema.columns.iter().map(|c| c.name.clone()).collect();
-                }
-            }
-            vec![]
-        };
-
-        let base_cols = get_columns(&self.database, &base_table.name);
+        let base_cols = get_table_columns(&self.database, &base_table.name);
         table_info.push((base_table.name.clone(), base_table.alias.clone(), base_cols));
 
         for step in &join_steps {
-            let cols = get_columns(&self.database, &step.right.name);
+            let cols = get_table_columns(&self.database, &step.right.name);
             table_info.push((step.right.name.clone(), step.right.alias.clone(), cols));
         }
 
