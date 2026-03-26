@@ -72,6 +72,10 @@ name = "blog_benchmark_test"
 path = "tests/integration/blog_benchmark_test.rs"
 
 [[test]]
+name = "join_test"
+path = "tests/integration/join_test.rs"
+
+[[test]]
 name = "stress_1m"
 path = "tests/stress_1m.rs"
 

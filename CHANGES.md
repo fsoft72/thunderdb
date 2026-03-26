@@ -1,36 +1,15 @@
 # ThunderDB Changes
 
-## 2026-03-26 - Implement JOIN execution in REPL
+## 2026-03-26 - SQL JOIN support
 
-- `execute_join()` method handles SELECT with JOIN via hash join (BTreeMap, since Value lacks Hash)
-- `flatten_joins()` converts recursive FromClause tree into base table + ordered JoinStep list
-- `build_join_column_mapping()` maps qualified (`table.col`) and bare column names to merged-row positions
-- `partition_filters()` pushes WHERE filters down to individual table scans when possible, keeps remainder for post-join
-- `hash_join()` supports INNER, LEFT, and RIGHT joins with null-padding for outer joins
-- COUNT(*) with JOIN executes the join pipeline and counts results
-- SELECT * with JOIN produces prefixed column headers (`table.col`)
-- ORDER BY, LIMIT/OFFSET, and column projection all work on joined result sets
-- File changed: `src/repl/mod.rs`
-
-## 2026-03-26 - Parse FROM clause with JOIN/LEFT/RIGHT, dot-qualified columns
-
-- `parse_from_clause()` replaces inline FROM parsing; handles JOIN chains with ON conditions
-- Supports `JOIN`, `INNER JOIN`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`
-- `parse_optional_alias()` for table aliases (e.g., `users u`)
-- `parse_column_ref()` for `table.column` syntax in ON conditions
-- Dot-qualified columns in SELECT (`u.name`), WHERE (`u.age > 25`), and ORDER BY (`u.name`)
-- 5 new parser tests: inner join, left join, multi-join, qualified columns, qualified where
-- File changed: `src/parser/parser.rs`
-
-## 2026-03-26 - Add JOIN AST types, change SelectStatement.from to FromClause
-
-- New AST types: `TableRef`, `ColumnRef`, `JoinType`, `FromClause` for representing JOIN syntax
-- `FromClause` supports single table (`Table`) and join chains (`Join`) with ON conditions
-- `SelectStatement.from` changed from `String` to `FromClause`
-- Added `SelectColumn::QualifiedColumn(table, column)` for `table.column` syntax in SELECT
-- Added `Expression::QualifiedColumn(table, column)` for `table.column` in WHERE clauses
-- All existing code updated to use `from.base_table_name()` for backward compatibility
-- Files changed: `src/parser/ast.rs`, `src/parser/parser.rs`, `src/parser/executor.rs`, `src/parser/validator.rs`, `src/parser/cache.rs`, `src/repl/mod.rs`
+- INNER JOIN, LEFT JOIN, RIGHT JOIN with multi-table chaining
+- Table aliases (`FROM users u JOIN posts p ON u.id = p.author_id`)
+- Dot-qualified column references (`u.name`, `p.title`) in SELECT, WHERE, ORDER BY
+- Ambiguous bare column detection with helpful error messages
+- WHERE filter pushdown to per-table scans for index utilization
+- Hash join execution in the REPL layer
+- New tokens: JOIN, INNER, LEFT, RIGHT, OUTER, Dot
+- New AST: FromClause, TableRef, ColumnRef, JoinType, QualifiedColumn
 
 ## 2026-03-26 - Add CREATE INDEX and SELECT COUNT(*) to SQL
 
