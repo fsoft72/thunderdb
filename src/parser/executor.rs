@@ -83,52 +83,64 @@ impl Executor {
                     }
                     _ => {
                         // Comparison operator - create a filter
-                        if let Expression::Column(col_name) = left.as_ref() {
-                            let value = Self::expression_to_value(right)?;
-                            let operator = Self::binary_op_to_operator(op, value)?;
-                            filters.push(Filter::new(col_name.clone(), operator));
-                        } else {
-                            return Err(Error::Query(
-                                "Left side of comparison must be a column".to_string(),
-                            ));
-                        }
+                        let col_name = match left.as_ref() {
+                            Expression::Column(name) => name.clone(),
+                            Expression::QualifiedColumn(table, col) => format!("{}.{}", table, col),
+                            _ => {
+                                return Err(Error::Query(
+                                    "Left side of comparison must be a column".to_string(),
+                                ));
+                            }
+                        };
+                        let value = Self::expression_to_value(right)?;
+                        let operator = Self::binary_op_to_operator(op, value)?;
+                        filters.push(Filter::new(col_name, operator));
                     }
                 }
             }
             Expression::Like { expr, pattern } => {
-                if let Expression::Column(col_name) = expr.as_ref() {
-                    filters.push(Filter::new(
-                        col_name.clone(),
-                        Operator::Like(pattern.clone()),
-                    ));
-                }
+                let col_name = match expr.as_ref() {
+                    Expression::Column(name) => name.clone(),
+                    Expression::QualifiedColumn(table, col) => format!("{}.{}", table, col),
+                    _ => return Err(Error::Query("LIKE requires a column reference".to_string())),
+                };
+                filters.push(Filter::new(col_name, Operator::Like(pattern.clone())));
             }
             Expression::In { expr, list } => {
-                if let Expression::Column(col_name) = expr.as_ref() {
-                    let values: Result<Vec<Value>> =
-                        list.iter().map(|e| Self::expression_to_value(e)).collect();
-                    filters.push(Filter::new(col_name.clone(), Operator::In(values?)));
-                }
+                let col_name = match expr.as_ref() {
+                    Expression::Column(name) => name.clone(),
+                    Expression::QualifiedColumn(table, col) => format!("{}.{}", table, col),
+                    _ => return Err(Error::Query("IN requires a column reference".to_string())),
+                };
+                let values: Result<Vec<Value>> =
+                    list.iter().map(|e| Self::expression_to_value(e)).collect();
+                filters.push(Filter::new(col_name, Operator::In(values?)));
             }
             Expression::Between { expr, low, high } => {
-                if let Expression::Column(col_name) = expr.as_ref() {
-                    let low_val = Self::expression_to_value(low)?;
-                    let high_val = Self::expression_to_value(high)?;
-                    filters.push(Filter::new(
-                        col_name.clone(),
-                        Operator::Between(low_val, high_val),
-                    ));
-                }
+                let col_name = match expr.as_ref() {
+                    Expression::Column(name) => name.clone(),
+                    Expression::QualifiedColumn(table, col) => format!("{}.{}", table, col),
+                    _ => return Err(Error::Query("BETWEEN requires a column reference".to_string())),
+                };
+                let low_val = Self::expression_to_value(low)?;
+                let high_val = Self::expression_to_value(high)?;
+                filters.push(Filter::new(col_name, Operator::Between(low_val, high_val)));
             }
             Expression::IsNull(expr) => {
-                if let Expression::Column(col_name) = expr.as_ref() {
-                    filters.push(Filter::new(col_name.clone(), Operator::IsNull));
-                }
+                let col_name = match expr.as_ref() {
+                    Expression::Column(name) => name.clone(),
+                    Expression::QualifiedColumn(table, col) => format!("{}.{}", table, col),
+                    _ => return Err(Error::Query("IS NULL requires a column reference".to_string())),
+                };
+                filters.push(Filter::new(col_name, Operator::IsNull));
             }
             Expression::IsNotNull(expr) => {
-                if let Expression::Column(col_name) = expr.as_ref() {
-                    filters.push(Filter::new(col_name.clone(), Operator::IsNotNull));
-                }
+                let col_name = match expr.as_ref() {
+                    Expression::Column(name) => name.clone(),
+                    Expression::QualifiedColumn(table, col) => format!("{}.{}", table, col),
+                    _ => return Err(Error::Query("IS NOT NULL requires a column reference".to_string())),
+                };
+                filters.push(Filter::new(col_name, Operator::IsNotNull));
             }
             _ => {
                 return Err(Error::Query(format!(
