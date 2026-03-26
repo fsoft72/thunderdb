@@ -48,8 +48,8 @@ impl Validator {
     /// Validate SELECT statement
     fn validate_select(&self, stmt: &SelectStatement) -> Result<()> {
         // Check table exists
-        if !self.known_tables.is_empty() && !self.known_tables.contains(&stmt.from) {
-            return Err(Error::Parser(format!("Table not found: {}", stmt.from)));
+        if !self.known_tables.is_empty() && !self.known_tables.contains(stmt.from.base_table_name()) {
+            return Err(Error::Parser(format!("Table not found: {}", stmt.from.base_table_name())));
         }
 
         // Validate WHERE clause
@@ -155,6 +155,13 @@ impl Validator {
             Expression::Column(name) => {
                 if name.is_empty() {
                     Err(Error::Parser("Column name cannot be empty".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+            Expression::QualifiedColumn(table, col) => {
+                if table.is_empty() || col.is_empty() {
+                    Err(Error::Parser("Qualified column reference cannot have empty parts".to_string()))
                 } else {
                     Ok(())
                 }

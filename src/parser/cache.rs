@@ -119,7 +119,7 @@ mod tests {
     fn make_select(table: &str) -> Statement {
         Statement::Select(SelectStatement {
             columns: vec![SelectColumn::Star],
-            from: table.to_string(),
+            from: FromClause::Table(TableRef { name: table.to_string(), alias: None }),
             where_clause: None,
             order_by: None,
             limit: None,

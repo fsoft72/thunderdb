@@ -34,6 +34,58 @@ pub struct CreateIndexStatement {
     pub column: String,
 }
 
+/// Table reference with optional alias
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRef {
+    pub name: String,
+    pub alias: Option<String>,
+}
+
+/// Column reference, optionally qualified with table/alias
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnRef {
+    pub table: Option<String>,
+    pub column: String,
+}
+
+/// JOIN type
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+}
+
+/// FROM clause — single table or chain of joins
+#[derive(Debug, Clone, PartialEq)]
+pub enum FromClause {
+    /// Single table: FROM users u
+    Table(TableRef),
+    /// Join: FROM users u JOIN posts p ON u.id = p.author_id
+    Join {
+        left: Box<FromClause>,
+        join_type: JoinType,
+        right: TableRef,
+        on_left: ColumnRef,
+        on_right: ColumnRef,
+    },
+}
+
+impl FromClause {
+    /// Get the base table name (leftmost table in join chain)
+    pub fn base_table_name(&self) -> &str {
+        match self {
+            FromClause::Table(t) => &t.name,
+            FromClause::Join { left, .. } => left.base_table_name(),
+        }
+    }
+
+    /// Check if this is a simple single-table FROM (no joins)
+    pub fn is_single_table(&self) -> bool {
+        matches!(self, FromClause::Table(_))
+    }
+}
+
 /// Column definition in CREATE TABLE
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnDefinition {
@@ -56,8 +108,8 @@ pub enum DataType {
 pub struct SelectStatement {
     /// Columns to select (None = *)
     pub columns: Vec<SelectColumn>,
-    /// Table name
-    pub from: String,
+    /// FROM clause (table or join)
+    pub from: FromClause,
     /// WHERE clause (optional)
     pub where_clause: Option<Expression>,
     /// ORDER BY clause (optional)
@@ -79,6 +131,8 @@ pub enum SelectColumn {
     ColumnWithAlias(String, String),
     /// COUNT(*)
     CountStar,
+    /// Qualified column reference (table.column)
+    QualifiedColumn(String, String),
 }
 
 /// ORDER BY clause
@@ -140,6 +194,8 @@ pub enum Expression {
     Literal(Value),
     /// Column reference
     Column(String),
+    /// Qualified column reference (table.column or alias.column)
+    QualifiedColumn(String, String),
     /// Binary operation (e.g., age > 18)
     BinaryOp {
         left: Box<Expression>,
@@ -238,6 +294,7 @@ impl SelectStatement {
             .filter_map(|col| match col {
                 SelectColumn::Column(name) => Some(name.clone()),
                 SelectColumn::ColumnWithAlias(name, _) => Some(name.clone()),
+                SelectColumn::QualifiedColumn(table, col) => Some(format!("{}.{}", table, col)),
                 SelectColumn::Star | SelectColumn::CountStar => None,
             })
             .collect()
@@ -273,7 +330,7 @@ mod tests {
     fn test_select_statement_basic() {
         let stmt = SelectStatement {
             columns: vec![SelectColumn::Star],
-            from: "users".to_string(),
+            from: FromClause::Table(TableRef { name: "users".to_string(), alias: None }),
             where_clause: None,
             order_by: None,
             limit: None,
@@ -291,7 +348,7 @@ mod tests {
                 SelectColumn::Column("id".to_string()),
                 SelectColumn::Column("name".to_string()),
             ],
-            from: "users".to_string(),
+            from: FromClause::Table(TableRef { name: "users".to_string(), alias: None }),
             where_clause: None,
             order_by: None,
             limit: None,
@@ -322,7 +379,7 @@ mod tests {
     fn test_statement_type() {
         let select = Statement::Select(SelectStatement {
             columns: vec![SelectColumn::Star],
-            from: "users".to_string(),
+            from: FromClause::Table(TableRef { name: "users".to_string(), alias: None }),
             where_clause: None,
             order_by: None,
             limit: None,

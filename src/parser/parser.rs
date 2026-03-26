@@ -68,7 +68,8 @@ impl Parser {
 
         // FROM clause
         self.expect(Token::From)?;
-        let from = self.expect_identifier()?;
+        let table_name = self.expect_identifier()?;
+        let from = FromClause::Table(TableRef { name: table_name, alias: None });
 
         // WHERE clause (optional)
         let where_clause = if self.match_token(&Token::Where) {
@@ -733,7 +734,7 @@ mod tests {
         match stmt {
             Statement::Select(s) => {
                 assert!(s.is_select_star());
-                assert_eq!(s.from, "users");
+                assert_eq!(s.from.base_table_name(), "users");
                 assert!(s.where_clause.is_none());
             }
             _ => panic!("Expected SELECT statement"),

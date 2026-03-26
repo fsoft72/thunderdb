@@ -210,7 +210,7 @@ impl<'a> Repl<'a> {
                 // COUNT(*) short-circuit: use the fast count path
                 if select.is_count_star() {
                     let filters = Executor::get_where_filters(&select.where_clause)?;
-                    let count = self.database.count(&select.from, filters)?;
+                    let count = self.database.count(select.from.base_table_name(), filters)?;
                     println!("COUNT(*)");
                     println!("--------");
                     println!("{}", count);
@@ -223,7 +223,7 @@ impl<'a> Repl<'a> {
                 // Get column names
                 let column_names = if select.is_select_star() {
                     // Try to get from table schema
-                    if let Some(table) = self.database.get_table(&select.from) {
+                    if let Some(table) = self.database.get_table(select.from.base_table_name()) {
                         if let Some(schema) = table.schema() {
                             schema.columns.iter().map(|c| c.name.clone()).collect()
                         } else if let Some(first_row) = rows.first() {

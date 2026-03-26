@@ -18,7 +18,7 @@ pub struct Executor;
 impl Executor {
     /// Convert a SELECT statement to a QueryBuilder
     pub fn select_to_query(stmt: &SelectStatement) -> QueryBuilder {
-        let mut query = QueryBuilder::from(&stmt.from);
+        let mut query = QueryBuilder::from(stmt.from.base_table_name());
 
         // Apply WHERE clause
         if let Some(ref where_expr) = stmt.where_clause {

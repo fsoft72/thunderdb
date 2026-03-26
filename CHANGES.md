@@ -1,5 +1,15 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Add JOIN AST types, change SelectStatement.from to FromClause
+
+- New AST types: `TableRef`, `ColumnRef`, `JoinType`, `FromClause` for representing JOIN syntax
+- `FromClause` supports single table (`Table`) and join chains (`Join`) with ON conditions
+- `SelectStatement.from` changed from `String` to `FromClause`
+- Added `SelectColumn::QualifiedColumn(table, column)` for `table.column` syntax in SELECT
+- Added `Expression::QualifiedColumn(table, column)` for `table.column` in WHERE clauses
+- All existing code updated to use `from.base_table_name()` for backward compatibility
+- Files changed: `src/parser/ast.rs`, `src/parser/parser.rs`, `src/parser/executor.rs`, `src/parser/validator.rs`, `src/parser/cache.rs`, `src/repl/mod.rs`
+
 ## 2026-03-26 - Add CREATE INDEX and SELECT COUNT(*) to SQL
 
 - `CREATE INDEX idx_name ON table (column)` — creates a B-tree index with automatic backfill
