@@ -96,36 +96,42 @@ where
 
     /// Search for all values matching a key
     ///
-    /// Returns vector of values (supports duplicates)
+    /// Uses `find_first_leaf` to land at the leftmost leaf that may
+    /// contain the key, then follows the leaf chain forward so
+    /// duplicates spanning multiple leaves are all collected.
     pub fn search(&self, key: &K) -> Vec<V> {
-        let leaf_id = self.find_leaf(key);
-        let leaf = &self.nodes[leaf_id as usize];
-
+        let mut current_id = self.find_first_leaf(key);
         let mut results = Vec::new();
 
-        // Find first occurrence (binary_search might return any match for duplicates)
-        let pos = leaf.find_position(key);
+        loop {
+            let leaf = &self.nodes[current_id as usize];
 
-        // Backtrack to find the first occurrence
-        let mut start_pos = pos;
-        while start_pos > 0 {
-            if leaf.keys[start_pos - 1].cmp(key) == std::cmp::Ordering::Equal {
-                start_pos -= 1;
+            // On the first leaf, binary-search then backtrack to the
+            // first occurrence.  On continuation leaves we start at 0.
+            let start = if results.is_empty() {
+                let pos = leaf.find_position(key);
+                let mut s = pos;
+                while s > 0 && leaf.keys[s - 1].cmp(key) == std::cmp::Ordering::Equal {
+                    s -= 1;
+                }
+                s
             } else {
-                break;
+                0
+            };
+
+            for i in start..leaf.keys.len() {
+                if leaf.keys[i].cmp(key) == std::cmp::Ordering::Equal {
+                    results.push(leaf.values[i].clone());
+                } else {
+                    return results;
+                }
+            }
+
+            match leaf.next_leaf {
+                Some(next) => current_id = next,
+                None => return results,
             }
         }
-
-        // Collect all matching values
-        for i in start_pos..leaf.keys.len() {
-            if leaf.keys[i].cmp(key) == std::cmp::Ordering::Equal {
-                results.push(leaf.values[i].clone());
-            } else {
-                break;
-            }
-        }
-
-        results
     }
 
     /// Range scan: find all values where start_key <= key <= end_key
@@ -267,7 +273,10 @@ where
         self.entry_count == 0
     }
 
-    /// Find the leaf node where a key should be located
+    /// Find the leaf node where a key should be inserted.
+    ///
+    /// On equal keys at internal nodes, goes RIGHT so new duplicates
+    /// are appended after existing ones.
     fn find_leaf(&self, key: &K) -> u64 {
         let mut current_id = self.root_id;
 
@@ -287,6 +296,30 @@ where
             }
 
             current_id = node.children[child_idx];
+        }
+    }
+
+    /// Find the leftmost leaf that may contain the key.
+    ///
+    /// At each internal node, backtracks past all equal keys so we
+    /// descend into the leftmost child that could hold duplicates.
+    fn find_first_leaf(&self, key: &K) -> u64 {
+        let mut current_id = self.root_id;
+
+        loop {
+            let node = &self.nodes[current_id as usize];
+
+            if node.is_leaf() {
+                return current_id;
+            }
+
+            let mut pos = node.find_position(key);
+            // Backtrack past all equal separator keys so we enter
+            // the leftmost subtree that contains the search key.
+            while pos > 0 && node.keys[pos - 1].cmp(key) == std::cmp::Ordering::Equal {
+                pos -= 1;
+            }
+            current_id = node.children[pos];
         }
     }
 

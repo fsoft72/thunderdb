@@ -1,5 +1,12 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Fix B-tree search for duplicate keys spanning leaf boundaries
+
+- `BTree::search()` now follows the `next_leaf` chain to collect all matching entries
+- Added `find_first_leaf()` that backtracks past equal separator keys at internal nodes to descend into the leftmost subtree containing the search key
+- Previously, search only scanned one leaf node, returning partial results when duplicate keys were split across leaf boundaries during B-tree splits
+- Blog benchmark test re-enabled indexes on all foreign-key columns (author_id, post_id)
+
 ## 2026-03-26 - Blog benchmark test suite
 
 - New integration test: 5 users, 10,000 blog posts, ~30,000 comments (2–4 per post)

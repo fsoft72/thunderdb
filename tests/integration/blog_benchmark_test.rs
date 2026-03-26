@@ -3,10 +3,8 @@
 /// Exercises bulk inserts, full-text search (LIKE), index-accelerated
 /// lookups, and manual joins across the three tables.
 ///
-/// NOTE: indexes are only placed on columns with unique or low-duplicate
-/// keys (post.id, comment.post_id with ≤4 dupes). The B-tree search
-/// currently scans only one leaf node, so columns with thousands of
-/// duplicates per key (e.g. author_id over 5 users) must use full scans.
+/// All foreign-key and primary-key columns are indexed to exercise
+/// the B-tree with both unique and high-duplicate keys.
 
 use thunderdb::{Database, Value, DirectDataAccess, Filter, Operator};
 use thunderdb::storage::table_engine::{ColumnInfo, TableSchema};
@@ -86,9 +84,8 @@ fn setup_db() -> Database {
                 ],
             })
             .unwrap();
-        // Only index `id` (unique). author_id has ~2000 dupes per key
-        // which exceeds a single leaf — skip index for correctness.
         table.create_index("id").unwrap();
+        table.create_index("author_id").unwrap();
     }
 
     // ── Comments ───────────────────────────────────────────────────────
@@ -121,9 +118,8 @@ fn setup_db() -> Database {
                 ],
             })
             .unwrap();
-        // No index on post_id or author_id — B-tree search scans only
-        // one leaf, so even 2–4 duplicates can be split across a
-        // leaf boundary and return partial results. Full scan is correct.
+        table.create_index("post_id").unwrap();
+        table.create_index("author_id").unwrap();
     }
 
     db
@@ -179,8 +175,8 @@ fn test_blog_benchmark_suite() {
     assert_eq!(results[0].values[0], Value::Int32(42));
     println!("{} hit in {:?}", results.len(), elapsed);
 
-    // ── 4. Posts by author (full scan, no index) ───────────────────────
-    println!("\n=== 4. Posts by author_id=1 (full scan) ===");
+    // ── 4. Posts by author (indexed, high-duplicate key) ──────────────
+    println!("\n=== 4. Posts by author_id=1 (indexed) ===");
 
     let t = Instant::now();
     let user1_posts = db.scan(
@@ -196,8 +192,8 @@ fn test_blog_benchmark_suite() {
     }
     println!("{} rows in {:?}", user1_posts.len(), elapsed);
 
-    // ── 5. Single post + comments (manual join) ────────────────────────
-    println!("\n=== 5. Join: post 500 + comments ===");
+    // ── 5. Single post + comments (indexed join) ───────────────────────
+    println!("\n=== 5. Join: post 500 + comments (indexed) ===");
 
     let post_id = 500;
     let t = Instant::now();
