@@ -41,6 +41,11 @@ pub enum Token {
     Drop,
     Index,
     On,
+    Join,
+    Inner,
+    Left,
+    Right,
+    Outer,
 
     // Operators
     Equals,           // =
@@ -64,6 +69,7 @@ pub enum Token {
     RightParen,   // )
     Comma,        // ,
     Semicolon,    // ;
+    Dot,          // .
 
     // Special
     Eof,
@@ -209,6 +215,10 @@ impl Tokenizer {
                     Token::GreaterThan
                 }
             }
+            '.' => {
+                self.advance();
+                Token::Dot
+            }
             '\'' | '"' => self.read_string()?,
             _ if ch.is_ascii_digit() => self.read_number()?,
             _ if ch.is_alphabetic() || ch == '_' => self.read_identifier_or_keyword(),
@@ -343,6 +353,11 @@ impl Tokenizer {
             "DROP" => Token::Drop,
             "INDEX" => Token::Index,
             "ON" => Token::On,
+            "JOIN" => Token::Join,
+            "INNER" => Token::Inner,
+            "LEFT" => Token::Left,
+            "RIGHT" => Token::Right,
+            "OUTER" => Token::Outer,
             _ => Token::Identifier(value),
         }
     }
@@ -552,6 +567,31 @@ mod tests {
         assert_eq!(tokens[1], Token::Number(10.0));
         assert_eq!(tokens[2], Token::Offset);
         assert_eq!(tokens[3], Token::Number(5.0));
+    }
+
+    #[test]
+    fn test_tokenize_join() {
+        let mut tokenizer = Tokenizer::new("FROM users u JOIN posts p ON u.id = p.author_id");
+        let tokens = tokenizer.tokenize().unwrap();
+
+        assert_eq!(tokens[0], Token::From);
+        assert_eq!(tokens[1], Token::Identifier("users".to_string()));
+        assert_eq!(tokens[2], Token::Identifier("u".to_string()));
+        assert_eq!(tokens[3], Token::Join);
+        assert_eq!(tokens[4], Token::Identifier("posts".to_string()));
+        assert_eq!(tokens[5], Token::Identifier("p".to_string()));
+        assert_eq!(tokens[6], Token::On);
+    }
+
+    #[test]
+    fn test_tokenize_left_join() {
+        let mut tokenizer = Tokenizer::new("LEFT OUTER JOIN orders");
+        let tokens = tokenizer.tokenize().unwrap();
+
+        assert_eq!(tokens[0], Token::Left);
+        assert_eq!(tokens[1], Token::Outer);
+        assert_eq!(tokens[2], Token::Join);
+        assert_eq!(tokens[3], Token::Identifier("orders".to_string()));
     }
 
     #[test]
