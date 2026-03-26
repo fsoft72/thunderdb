@@ -153,9 +153,7 @@ impl IndexManager {
                 }
 
                 // Sort by key for better B-Tree insertion locality
-                entries.sort_by(|a, b| {
-                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Less)
-                });
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
 
                 if let Some(index) = self.indices.get_mut(column_name) {
                     for (value, row_id) in &entries {

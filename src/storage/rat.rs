@@ -211,13 +211,18 @@ impl RecordAddressTable {
     pub fn bulk_insert(&mut self, batch: Vec<(u64, u64, u32)>) -> Result<()> {
         let mut added = 0usize;
         for (row_id, offset, length) in batch {
-            let was_active = self.entries.get(&row_id).map_or(false, |e| !e.deleted);
-            self.entries.insert(row_id, RatEntry {
-                row_id,
-                offset,
-                length,
-                deleted: false,
-            });
+            use std::collections::btree_map::Entry;
+            let was_active = match self.entries.entry(row_id) {
+                Entry::Occupied(mut e) => {
+                    let prev_active = !e.get().deleted;
+                    e.insert(RatEntry { row_id, offset, length, deleted: false });
+                    prev_active
+                }
+                Entry::Vacant(e) => {
+                    e.insert(RatEntry { row_id, offset, length, deleted: false });
+                    false
+                }
+            };
             if !was_active {
                 added += 1;
             }

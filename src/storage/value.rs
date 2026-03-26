@@ -266,7 +266,8 @@ impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
 
-        /// Return a discriminant index for variant ordering
+        /// Sort-order discriminant — intentionally distinct from the TYPE_*
+        /// serialization tags (which use a different numbering).
         fn variant_index(v: &Value) -> u8 {
             match v {
                 Value::Int32(_) => 0,

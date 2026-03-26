@@ -36,7 +36,7 @@ impl IndexStatistics {
     /// # Arguments
     /// * `tree` - B-Tree to analyze
     pub fn from_btree(tree: &BTree<Value, u64>) -> Self {
-        let all_entries = tree.scan_all();
+        let mut all_entries = tree.scan_all();
 
         if all_entries.is_empty() {
             return Self {
@@ -50,21 +50,19 @@ impl IndexStatistics {
 
         let total_entries = all_entries.len();
 
-        // Extract keys and sort for O(n log n) cardinality counting
-        // without the heap churn of HashSet<format!("{:?}", key)>
-        let mut keys: Vec<&Value> = all_entries.iter().map(|(k, _)| k).collect();
-        keys.sort();
+        // Sort by key so we can count distinct keys via adjacent comparison
+        // (avoids HashSet + format!("{:?}") heap churn)
+        all_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Count distinct keys by comparing adjacent sorted entries
         let mut cardinality = 1;
-        for i in 1..keys.len() {
-            if keys[i] != keys[i - 1] {
+        for i in 1..all_entries.len() {
+            if all_entries[i].0 != all_entries[i - 1].0 {
                 cardinality += 1;
             }
         }
 
-        let min_value = Some(keys[0].clone());
-        let max_value = Some(keys[keys.len() - 1].clone());
+        let min_value = Some(all_entries[0].0.clone());
+        let max_value = Some(all_entries[all_entries.len() - 1].0.clone());
 
         let avg_duplicates = if cardinality > 0 {
             total_entries as f64 / cardinality as f64

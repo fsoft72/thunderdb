@@ -323,16 +323,11 @@ impl<'a> Repl<'a> {
             &plan.table, filters, scan_limit, scan_offset,
         )?;
 
-        // Build column mapping for ordering / projection
+        // Build column mapping for ordering / projection (uses cached Arc)
         if has_ordering || has_projection {
-            let mut column_mapping = std::collections::HashMap::new();
-            if let Some(table) = self.database.get_table(&plan.table) {
-                if let Some(schema) = table.schema() {
-                    for (i, col) in schema.columns.iter().enumerate() {
-                        column_mapping.insert(col.name.clone(), i);
-                    }
-                }
-            }
+            let column_mapping = self.database.get_table_mut(&plan.table)
+                .map(|t| t.build_column_mapping())
+                .unwrap_or_default();
 
             rows = plan.apply_ordering(rows, &column_mapping);
 

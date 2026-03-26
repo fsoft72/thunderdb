@@ -30,11 +30,11 @@ impl Filter {
     pub fn new(column: impl Into<String>, operator: Operator) -> Self {
         let operator = match operator {
             Operator::In(mut values) => {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less));
+                values.sort();
                 Operator::In(values)
             }
             Operator::NotIn(mut values) => {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less));
+                values.sort();
                 Operator::NotIn(values)
             }
             other => other,
@@ -143,12 +143,8 @@ impl Operator {
                 let le_end = value.partial_cmp(end).map_or(false, |ord| ord != std::cmp::Ordering::Greater);
                 ge_start && le_end
             }
-            Operator::In(values) => values.binary_search_by(|v| {
-                v.partial_cmp(value).unwrap_or(std::cmp::Ordering::Greater)
-            }).is_ok(),
-            Operator::NotIn(values) => values.binary_search_by(|v| {
-                v.partial_cmp(value).unwrap_or(std::cmp::Ordering::Greater)
-            }).is_err(),
+            Operator::In(values) => values.binary_search_by(|v| v.cmp(value)).is_ok(),
+            Operator::NotIn(values) => values.binary_search_by(|v| v.cmp(value)).is_err(),
             Operator::Like(pattern) => {
                 if let Value::Varchar(_) = value {
                     // Use simple pattern matching

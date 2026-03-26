@@ -1,5 +1,14 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Simplify: post-refactor cleanup
+
+- **stats.rs**: Removed extra Vec allocation for cardinality counting; sort `all_entries` in place and compute min/max directly from it
+- **repl/mod.rs**: Replaced manual column mapping construction with cached `build_column_mapping()`
+- **manager.rs, filter.rs**: Replaced dead `partial_cmp().unwrap_or()` fallbacks with `cmp()` since Value now implements Ord
+- **rat.rs**: Collapsed double BTreeMap traversal (`get` + `insert`) in `bulk_insert` into single `entry()` API call
+- **table_engine.rs**: Deduplicated index backfill logic in `load_to_memory` — now calls `create_index()` which already handles backfill
+- **value.rs**: Clarified `variant_index` comment to distinguish from `TYPE_*` serialization constants
+
 ## 2026-02-06 - Phase 1: Storage Layer
 
 ### Step 1.1: Project Setup & Configuration

@@ -153,19 +153,10 @@ impl TableEngine {
             mem_table.insert_row(row.values)?;
         }
 
-        // Copy indices if any
+        // Recreate indices with backfill from the rows we just copied
         let indexed_columns = disk_table.index_manager.indexed_columns().to_vec();
         for col in indexed_columns {
-            mem_table.index_manager.create_index(&col)?;
-        }
-
-        // Rebuild indices in memory
-        if ! mem_table.index_manager.indexed_columns().is_empty() {
-            let mapping = mem_table.build_column_mapping();
-            let rows = mem_table.scan_all()?;
-            for col in mem_table.index_manager.indexed_columns().to_vec() {
-                mem_table.index_manager.rebuild_index(&col, &rows, &mapping)?;
-            }
+            mem_table.create_index(&col)?;
         }
 
         Ok(mem_table)
