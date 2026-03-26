@@ -68,6 +68,10 @@ name = "schema_test"
 path = "tests/integration/schema_test.rs"
 
 [[test]]
+name = "blog_benchmark_test"
+path = "tests/integration/blog_benchmark_test.rs"
+
+[[test]]
 name = "stress_1m"
 path = "tests/stress_1m.rs"
 

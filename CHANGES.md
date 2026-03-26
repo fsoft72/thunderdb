@@ -1,5 +1,11 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Blog benchmark test suite
+
+- New integration test: 5 users, 10,000 blog posts, ~30,000 comments (2–4 per post)
+- Tests: table counts, LIKE prefix search on title/content, author filter, manual joins (post+comments, 3-table with user names), recent posts page with comment counts, IN operator, BETWEEN range scan
+- Discovered B-tree limitation: search only scans one leaf node, so duplicate keys split across leaf boundaries return partial results — indexes limited to unique columns
+
 ## 2026-03-26 - Simplify: post-refactor cleanup
 
 - **stats.rs**: Removed extra Vec allocation for cardinality counting; sort `all_entries` in place and compute min/max directly from it
