@@ -1,5 +1,15 @@
 # ThunderDB Changes
 
+## 2026-03-26 - Parse FROM clause with JOIN/LEFT/RIGHT, dot-qualified columns
+
+- `parse_from_clause()` replaces inline FROM parsing; handles JOIN chains with ON conditions
+- Supports `JOIN`, `INNER JOIN`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`
+- `parse_optional_alias()` for table aliases (e.g., `users u`)
+- `parse_column_ref()` for `table.column` syntax in ON conditions
+- Dot-qualified columns in SELECT (`u.name`), WHERE (`u.age > 25`), and ORDER BY (`u.name`)
+- 5 new parser tests: inner join, left join, multi-join, qualified columns, qualified where
+- File changed: `src/parser/parser.rs`
+
 ## 2026-03-26 - Add JOIN AST types, change SelectStatement.from to FromClause
 
 - New AST types: `TableRef`, `ColumnRef`, `JoinType`, `FromClause` for representing JOIN syntax

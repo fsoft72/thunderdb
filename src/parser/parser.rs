@@ -68,8 +68,7 @@ impl Parser {
 
         // FROM clause
         self.expect(Token::From)?;
-        let table_name = self.expect_identifier()?;
-        let from = FromClause::Table(TableRef { name: table_name, alias: None });
+        let from = self.parse_from_clause()?;
 
         // WHERE clause (optional)
         let where_clause = if self.match_token(&Token::Where) {
@@ -80,15 +79,20 @@ impl Parser {
 
         // ORDER BY (optional)
         let order_by = if self.match_token(&Token::OrderBy) {
-            let column = self.expect_identifier()?;
+            let col = self.expect_identifier()?;
+            let column = if self.match_token(&Token::Dot) {
+                let col2 = self.expect_identifier()?;
+                format!("{}.{}", col, col2)
+            } else {
+                col
+            };
             let direction = if self.match_token(&Token::Asc) {
                 OrderDirection::Asc
             } else if self.match_token(&Token::Desc) {
                 OrderDirection::Desc
             } else {
-                OrderDirection::Asc // Default
+                OrderDirection::Asc
             };
-
             Some(OrderByClause { column, direction })
         } else {
             None
@@ -137,6 +141,9 @@ impl Parser {
                 self.expect(Token::Star)?;
                 self.expect(Token::RightParen)?;
                 columns.push(SelectColumn::CountStar);
+            } else if self.match_token(&Token::Dot) {
+                let column = self.expect_identifier()?;
+                columns.push(SelectColumn::QualifiedColumn(col_name, column));
             } else if self.match_token(&Token::As) {
                 let alias = self.expect_identifier()?;
                 columns.push(SelectColumn::ColumnWithAlias(col_name, alias));
@@ -586,7 +593,12 @@ impl Parser {
             Token::Identifier(name) => {
                 let identifier = name.clone();
                 self.advance();
-                Ok(Expression::Column(identifier))
+                if self.match_token(&Token::Dot) {
+                    let column = self.expect_identifier()?;
+                    Ok(Expression::QualifiedColumn(identifier, column))
+                } else {
+                    Ok(Expression::Column(identifier))
+                }
             }
             Token::Null => {
                 self.advance();
@@ -602,6 +614,82 @@ impl Parser {
                 "Unexpected token in expression: {:?}",
                 self.current()
             ))),
+        }
+    }
+
+    /// Parse FROM clause with optional JOIN chain
+    fn parse_from_clause(&mut self) -> Result<FromClause> {
+        let name = self.expect_identifier()?;
+        let alias = self.parse_optional_alias();
+        let mut from = FromClause::Table(TableRef { name, alias });
+
+        loop {
+            let join_type = match self.current() {
+                Token::Join => {
+                    self.advance();
+                    JoinType::Inner
+                }
+                Token::Inner => {
+                    self.advance();
+                    self.expect(Token::Join)?;
+                    JoinType::Inner
+                }
+                Token::Left => {
+                    self.advance();
+                    let _ = self.match_token(&Token::Outer);
+                    self.expect(Token::Join)?;
+                    JoinType::Left
+                }
+                Token::Right => {
+                    self.advance();
+                    let _ = self.match_token(&Token::Outer);
+                    self.expect(Token::Join)?;
+                    JoinType::Right
+                }
+                _ => break,
+            };
+
+            let right_name = self.expect_identifier()?;
+            let right_alias = self.parse_optional_alias();
+            let right = TableRef { name: right_name, alias: right_alias };
+
+            self.expect(Token::On)?;
+            let on_left = self.parse_column_ref()?;
+            self.expect(Token::Equals)?;
+            let on_right = self.parse_column_ref()?;
+
+            from = FromClause::Join {
+                left: Box::new(from),
+                join_type,
+                right,
+                on_left,
+                on_right,
+            };
+        }
+
+        Ok(from)
+    }
+
+    /// Parse optional table alias (non-keyword identifier after table name)
+    fn parse_optional_alias(&mut self) -> Option<String> {
+        match self.current() {
+            Token::Identifier(name) => {
+                let alias = name.clone();
+                self.advance();
+                Some(alias)
+            }
+            _ => None,
+        }
+    }
+
+    /// Parse a column reference: identifier or identifier.identifier
+    fn parse_column_ref(&mut self) -> Result<ColumnRef> {
+        let first = self.expect_identifier()?;
+        if self.match_token(&Token::Dot) {
+            let column = self.expect_identifier()?;
+            Ok(ColumnRef { table: Some(first), column })
+        } else {
+            Ok(ColumnRef { table: None, column: first })
         }
     }
 
@@ -850,5 +938,78 @@ mod tests {
     fn test_parse_error() {
         let result = parse_sql("INVALID SQL");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_join_inner() {
+        let stmt = parse_sql("SELECT * FROM users u JOIN posts p ON u.id = p.author_id").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(!s.from.is_single_table());
+                assert_eq!(s.from.base_table_name(), "users");
+            }
+            _ => panic!("Expected SELECT"),
+        }
+    }
+
+    #[test]
+    fn test_parse_join_left() {
+        let stmt = parse_sql("SELECT * FROM users u LEFT JOIN posts p ON u.id = p.author_id").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                if let FromClause::Join { join_type, .. } = &s.from {
+                    assert_eq!(*join_type, JoinType::Left);
+                } else {
+                    panic!("Expected join");
+                }
+            }
+            _ => panic!("Expected SELECT"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_join() {
+        let sql = "SELECT * FROM users u JOIN posts p ON u.id = p.author_id JOIN comments c ON p.id = c.post_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                if let FromClause::Join { left, right, .. } = &s.from {
+                    assert_eq!(right.name, "comments");
+                    if let FromClause::Join { right: inner_right, .. } = left.as_ref() {
+                        assert_eq!(inner_right.name, "posts");
+                    } else {
+                        panic!("Expected inner join");
+                    }
+                } else {
+                    panic!("Expected join");
+                }
+            }
+            _ => panic!("Expected SELECT"),
+        }
+    }
+
+    #[test]
+    fn test_parse_qualified_columns() {
+        let stmt = parse_sql("SELECT u.name, p.title FROM users u JOIN posts p ON u.id = p.author_id").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.columns.len(), 2);
+                assert!(matches!(&s.columns[0], SelectColumn::QualifiedColumn(t, c) if t == "u" && c == "name"));
+                assert!(matches!(&s.columns[1], SelectColumn::QualifiedColumn(t, c) if t == "p" && c == "title"));
+            }
+            _ => panic!("Expected SELECT"),
+        }
+    }
+
+    #[test]
+    fn test_parse_qualified_where() {
+        let stmt = parse_sql("SELECT * FROM users u JOIN posts p ON u.id = p.author_id WHERE u.age > 25").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(s.where_clause.is_some());
+                assert!(!s.from.is_single_table());
+            }
+            _ => panic!("Expected SELECT"),
+        }
     }
 }
