@@ -133,6 +133,7 @@ fn setup_thunderdb() -> Database {
             .unwrap();
         table.create_index("id").unwrap();
         table.create_index("author_id").unwrap();
+        table.create_index("title").unwrap();
     }
 
     // Comments
@@ -201,7 +202,8 @@ fn setup_sqlite() -> Connection {
             text      TEXT NOT NULL
          );
          CREATE INDEX idx_comments_post   ON comments(post_id);
-         CREATE INDEX idx_comments_author ON comments(author_id);",
+         CREATE INDEX idx_comments_author ON comments(author_id);
+         CREATE INDEX idx_posts_title ON blog_posts(title);",
     )
     .unwrap();
 
