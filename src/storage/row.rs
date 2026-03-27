@@ -154,6 +154,46 @@ impl Row {
         Ok(value)
     }
 
+    /// Deserialize only the specified columns from raw row bytes.
+    ///
+    /// Uses the column-offset array to skip unneeded columns.
+    /// Returns a Row with `values.len() == col_indices.len()`, in the
+    /// order specified by `col_indices`.
+    pub fn from_bytes_projected(bytes: &[u8], col_indices: &[usize]) -> Result<Self> {
+        if bytes.len() < 12 {
+            return Err(Error::Serialization(
+                "Insufficient bytes for row header".to_string(),
+            ));
+        }
+
+        let row_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let value_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let offsets_start = 12;
+        let values_area_start = offsets_start + value_count * 2;
+
+        let mut values = Vec::with_capacity(col_indices.len());
+
+        for &col_idx in col_indices {
+            if col_idx >= value_count {
+                return Err(Error::Serialization(format!(
+                    "Column index {} out of bounds (row has {} columns)",
+                    col_idx, value_count
+                )));
+            }
+
+            let off_pos = offsets_start + col_idx * 2;
+            let col_offset = u16::from_le_bytes(
+                bytes[off_pos..off_pos + 2].try_into().unwrap(),
+            ) as usize;
+
+            let value_pos = values_area_start + col_offset;
+            let (value, _) = Value::from_bytes(&bytes[value_pos..])?;
+            values.push(value);
+        }
+
+        Ok(Self { row_id, values })
+    }
+
     /// Get the number of columns in this row
     pub fn column_count(&self) -> usize {
         self.values.len()
@@ -330,6 +370,42 @@ mod tests {
 
         // Out of bounds
         assert!(Row::value_at(&bytes, 3).is_err());
+    }
+
+    #[test]
+    fn test_from_bytes_projected() {
+        let row = Row::new(
+            1,
+            vec![
+                Value::Int32(42),
+                Value::varchar("hello world".to_string()),
+                Value::Int64(999),
+                Value::varchar("this is a long content field".to_string()),
+            ],
+        );
+
+        let bytes = row.to_bytes();
+
+        // Project only columns 0 and 2 (skip the VARCHAR columns)
+        let projected = Row::from_bytes_projected(&bytes, &[0, 2]).unwrap();
+        assert_eq!(projected.values.len(), 2);
+        assert_eq!(projected.values[0], Value::Int32(42));
+        assert_eq!(projected.values[1], Value::Int64(999));
+
+        // Project single column
+        let single = Row::from_bytes_projected(&bytes, &[1]).unwrap();
+        assert_eq!(single.values.len(), 1);
+        assert_eq!(single.values[0], Value::varchar("hello world".to_string()));
+
+        // Project all columns in different order
+        let reordered = Row::from_bytes_projected(&bytes, &[3, 0]).unwrap();
+        assert_eq!(reordered.values.len(), 2);
+        assert_eq!(reordered.values[0], Value::varchar("this is a long content field".to_string()));
+        assert_eq!(reordered.values[1], Value::Int32(42));
+
+        // Empty projection
+        let empty = Row::from_bytes_projected(&bytes, &[]).unwrap();
+        assert_eq!(empty.values.len(), 0);
     }
 
     #[test]
