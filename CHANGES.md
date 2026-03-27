@@ -1,5 +1,14 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Use memchr SIMD for LIKE Contains matching
+
+- Added `memchr = "2"` as a direct dependency in `Cargo.toml`
+- Changed `LikePattern::Contains(String)` to a struct variant with a pre-built `memchr::memmem::Finder`
+- SIMD-accelerated substring search replaces `str::contains()` for `%pattern%` LIKE queries
+- Switched `Exact`, `Prefix`, `Suffix` matching to byte-level comparisons (`as_bytes()`)
+- Added manual `PartialEq` and `Clone` impls (Finder is not Clone/PartialEq)
+- All existing tests pass unchanged
+
 ## 2026-03-27 - ThunderDB vs SQLite3 comparison benchmark
 
 - New integration test: `tests/integration/thunderdb_vs_sqlite_bench.rs`

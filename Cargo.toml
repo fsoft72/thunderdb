@@ -10,6 +10,7 @@ repository = "https://github.com/yourusername/thunderdb-rust"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+memchr = "2"
 wasm-bindgen = { version = "0.2", optional = true }
 
 [lib]

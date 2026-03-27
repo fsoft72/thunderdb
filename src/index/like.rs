@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::storage::Value;
 
 /// LIKE pattern type
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum LikePattern {
     /// Prefix match: 'abc%' matches strings starting with "abc"
     Prefix(String),
@@ -15,7 +15,11 @@ pub enum LikePattern {
     Suffix(String),
 
     /// Contains: '%abc%' matches strings containing "abc"
-    Contains(String),
+    /// Pre-builds a memchr::memmem::Finder for SIMD-accelerated search.
+    Contains {
+        needle: String,
+        finder: memchr::memmem::Finder<'static>,
+    },
 
     /// Exact match: 'abc' (no wildcards)
     Exact(String),
@@ -24,7 +28,49 @@ pub enum LikePattern {
     Complex(String),
 }
 
+impl PartialEq for LikePattern {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Prefix(a), Self::Prefix(b)) => a == b,
+            (Self::Suffix(a), Self::Suffix(b)) => a == b,
+            (Self::Contains { needle: a, .. }, Self::Contains { needle: b, .. }) => a == b,
+            (Self::Exact(a), Self::Exact(b)) => a == b,
+            (Self::Complex(a), Self::Complex(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Clone for LikePattern {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Prefix(s) => Self::Prefix(s.clone()),
+            Self::Suffix(s) => Self::Suffix(s.clone()),
+            Self::Contains { needle, .. } => Self::new_contains(needle.clone()),
+            Self::Exact(s) => Self::Exact(s.clone()),
+            Self::Complex(s) => Self::Complex(s.clone()),
+        }
+    }
+}
+
 impl LikePattern {
+    /// Build a Contains variant with a pre-constructed SIMD Finder.
+    ///
+    /// # Safety
+    /// The Finder borrows from the needle's heap buffer. String heap data
+    /// has a stable address -- moving the struct does not move the heap
+    /// allocation -- so the Finder's internal pointer stays valid for the
+    /// lifetime of this enum variant.
+    fn new_contains(needle: String) -> Self {
+        let ptr = needle.as_bytes().as_ptr();
+        let len = needle.as_bytes().len();
+        // SAFETY: needle is heap-allocated, lives alongside finder in the
+        // same enum variant, and is never mutated after construction.
+        let static_bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let finder = memchr::memmem::Finder::new(static_bytes);
+        LikePattern::Contains { needle, finder }
+    }
+
     /// Parse a LIKE pattern string
     ///
     /// # Arguments
@@ -51,7 +97,7 @@ impl LikePattern {
             (true, true, 2) => {
                 // %abc%
                 let content = &pattern[1..pattern.len() - 1];
-                Ok(LikePattern::Contains(content.to_string()))
+                Ok(LikePattern::new_contains(content.to_string()))
             }
             (true, false, 1) => {
                 // %abc
@@ -88,10 +134,10 @@ impl LikePattern {
     /// Check if a string matches this pattern
     fn matches_string(&self, s: &str) -> bool {
         match self {
-            LikePattern::Exact(pattern) => s == pattern,
-            LikePattern::Prefix(prefix) => s.starts_with(prefix),
-            LikePattern::Suffix(suffix) => s.ends_with(suffix),
-            LikePattern::Contains(substring) => s.contains(substring),
+            LikePattern::Exact(pattern) => s.as_bytes() == pattern.as_bytes(),
+            LikePattern::Prefix(prefix) => s.as_bytes().starts_with(prefix.as_bytes()),
+            LikePattern::Suffix(suffix) => s.as_bytes().ends_with(suffix.as_bytes()),
+            LikePattern::Contains { finder, .. } => finder.find(s.as_bytes()).is_some(),
             LikePattern::Complex(pattern) => self.matches_complex(s, pattern),
         }
     }
@@ -229,7 +275,7 @@ mod tests {
     #[test]
     fn test_parse_contains() {
         let pattern = LikePattern::parse("%test%").unwrap();
-        assert_eq!(pattern, LikePattern::Contains("test".to_string()));
+        assert_eq!(pattern, LikePattern::new_contains("test".to_string()));
     }
 
     #[test]
