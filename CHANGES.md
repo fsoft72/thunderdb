@@ -1,10 +1,13 @@
 # ThunderDB Changes
 
-## 2026-03-27 - Batch I/O for indexed fetches
+## 2026-03-27 - Storage and I/O optimizations
 
-- **Clustered batch reads**: `DataFile::read_batch_sequential()` groups adjacent entries (gap < 64KB) into clusters, reading each cluster with a single I/O operation instead of per-row seek+read
-- **Reduced syscalls**: `TableEngine::fetch_rows_sorted_by_offset()` now delegates to batch reader, cutting syscalls from O(n) to O(clusters) for sequentially-inserted rows
-- Memory backend iterates directly (no syscall overhead to avoid)
+- **SmallString INLINE_CAP 32**: Inline storage threshold increased from 23 to 32 bytes, eliminating heap allocation for most short strings
+- **Zero-copy read_raw_with()**: Callback-based raw row access using internal buffer — no per-row Vec allocation
+- **Batch I/O for indexed fetches**: Adjacent rows read in a single I/O operation (64KB cluster threshold), reducing syscalls by 10-100x
+- **Projection pushdown**: `Row::from_bytes_projected()` deserializes only requested columns; `scan_with_projection()` API added
+- **Memory-mapped I/O**: New mmap backend for DataFile — zero-syscall reads via direct memory access, lazy remapping after writes
+- Added `memmap2` as dependency
 
 ## 2026-03-27 - Query optimizer improvements
 

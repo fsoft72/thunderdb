@@ -65,11 +65,7 @@ impl TableEngine {
 
         // Open data file
         let data_path = table_dir.join("data.bin");
-        let data_file = DataFile::open_with_group_commit(
-            &data_path,
-            config.fsync_on_write,
-            config.group_commit_interval_ms,
-        )?;
+        let data_file = DataFile::open_mmap(&data_path, config.fsync_on_write)?;
 
         // Load RAT
         let rat_path = table_dir.join("rat.bin");
@@ -581,11 +577,7 @@ impl TableEngine {
                 std::fs::rename(&tmp_path, &data_path)?;
 
                 // Reopen the data file
-                self.data_file = DataFile::open_with_group_commit(
-                    &data_path,
-                    self.config.fsync_on_write,
-                    self.config.group_commit_interval_ms,
-                )?;
+                self.data_file = DataFile::open_mmap(&data_path, self.config.fsync_on_write)?;
                 self.rat = new_rat;
             }
         }
