@@ -96,6 +96,79 @@ impl PageFile {
         Ok(())
     }
 
+    /// Read a page by ID.
+    ///
+    /// Uses mmap when available for zero-copy access.
+    pub fn read_page(&mut self, page_id: u32) -> Result<Page> {
+        if page_id >= self.page_count {
+            return Err(Error::Storage(format!(
+                "Page {} out of bounds (file has {} pages)",
+                page_id, self.page_count
+            )));
+        }
+
+        self.remap_if_needed()?;
+
+        let offset = page_id as usize * PAGE_SIZE;
+
+        if let Some(ref mmap) = self.mmap {
+            let end = offset + PAGE_SIZE;
+            if end > mmap.len() {
+                return Err(Error::Storage(format!(
+                    "mmap read out of bounds: {} > {}",
+                    end,
+                    mmap.len()
+                )));
+            }
+            let mut buf = [0u8; PAGE_SIZE];
+            buf.copy_from_slice(&mmap[offset..end]);
+            Page::from_bytes(buf)
+        } else {
+            let mut buf = [0u8; PAGE_SIZE];
+            self.file.seek(SeekFrom::Start(offset as u64))?;
+            self.file.read_exact(&mut buf)?;
+            Page::from_bytes(buf)
+        }
+    }
+
+    /// Write a page to the file.
+    pub fn write_page(&mut self, page: &Page) -> Result<()> {
+        let page_id = page.page_id();
+        if page_id >= self.page_count {
+            return Err(Error::Storage(format!(
+                "Page {} out of bounds (file has {} pages)",
+                page_id, self.page_count
+            )));
+        }
+
+        let offset = page_id as u64 * PAGE_SIZE as u64;
+        let bytes = page.to_bytes();
+
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(&bytes)?;
+        self.stale_mmap = true;
+
+        Ok(())
+    }
+
+    /// Allocate a new empty data page at the end of the file.
+    ///
+    /// Returns the new page_id.
+    pub fn allocate_page(&mut self) -> Result<u32> {
+        let page_id = self.page_count;
+        let page = Page::new(page_id);
+        let bytes = page.to_bytes();
+
+        let offset = page_id as u64 * PAGE_SIZE as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(&bytes)?;
+
+        self.page_count += 1;
+        self.stale_mmap = true;
+
+        Ok(page_id)
+    }
+
     /// Total number of pages (including FSM page 0).
     pub fn page_count(&self) -> u32 {
         self.page_count
@@ -128,6 +201,36 @@ mod tests {
         // File should be exactly 1 page
         let meta = fs::metadata(&path).unwrap();
         assert_eq!(meta.len(), PAGE_SIZE as u64);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_write_and_read_page() {
+        let path = temp_path("test_rw.pages");
+        cleanup(&path);
+
+        let mut pf = PageFile::open(&path).unwrap();
+
+        // Manually extend file for page 1
+        let page_id = pf.allocate_page().unwrap();
+        assert_eq!(page_id, 1);
+
+        // Create a page with data
+        let mut page = Page::new(page_id);
+        let row_data = crate::storage::page::serialize_row_for_page(
+            &vec![crate::storage::Value::Int32(42)],
+        );
+        page.insert_row(&row_data).unwrap();
+
+        // Write and read back
+        pf.write_page(&page).unwrap();
+        let restored = pf.read_page(page_id).unwrap();
+        assert_eq!(restored.page_id(), page_id);
+        assert_eq!(restored.active_count(), 1);
+
+        let row = restored.get_row(0).unwrap();
+        assert_eq!(row, &row_data[..]);
 
         cleanup(&path);
     }
