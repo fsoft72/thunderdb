@@ -383,4 +383,82 @@ mod tests {
 
         cleanup(&path);
     }
+
+    #[test]
+    fn test_insert_rows_across_pages() {
+        use crate::storage::page::serialize_row_for_page;
+        use crate::storage::Value;
+
+        let path = temp_path("test_multi_page.pages");
+        cleanup(&path);
+
+        let mut pf = PageFile::open(&path).unwrap();
+
+        // Insert 200 rows — should span multiple pages
+        let mut locations: Vec<(u32, u16)> = Vec::new(); // (page_id, slot_index)
+
+        for i in 0..200 {
+            // Use a padded string so rows are large enough to span multiple 8KB pages
+            let row_data = serialize_row_for_page(&vec![
+                Value::Int32(i),
+                Value::varchar(format!("row_{:0>50}", i)),
+            ]);
+
+            let page_id = pf.find_page_with_space(row_data.len()).unwrap();
+            let mut page = pf.read_page(page_id).unwrap();
+            let slot = page.insert_row(&row_data).unwrap();
+            pf.write_page(&page).unwrap();
+            pf.update_fsm(page_id, page.free_space()).unwrap();
+
+            locations.push((page_id, slot));
+        }
+
+        // Should have used multiple pages
+        assert!(pf.page_count() > 2, "Expected multiple data pages");
+
+        // Verify all rows are readable
+        for (i, &(page_id, slot)) in locations.iter().enumerate() {
+            let page = pf.read_page(page_id).unwrap();
+            let val = page.value_at(slot, 0).unwrap();
+            assert_eq!(val, Value::Int32(i as i32));
+        }
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_persistence_across_reopen() {
+        use crate::storage::page::serialize_row_for_page;
+        use crate::storage::Value;
+
+        let path = temp_path("test_persist.pages");
+        cleanup(&path);
+
+        // Write some data
+        let mut locations: Vec<(u32, u16)> = Vec::new();
+        {
+            let mut pf = PageFile::open(&path).unwrap();
+            for i in 0..10 {
+                let row_data = serialize_row_for_page(&vec![Value::Int32(i)]);
+                let page_id = pf.find_page_with_space(row_data.len()).unwrap();
+                let mut page = pf.read_page(page_id).unwrap();
+                let slot = page.insert_row(&row_data).unwrap();
+                pf.write_page(&page).unwrap();
+                pf.update_fsm(page_id, page.free_space()).unwrap();
+                locations.push((page_id, slot));
+            }
+        }
+
+        // Reopen and verify
+        {
+            let mut pf = PageFile::open(&path).unwrap();
+            for (i, &(page_id, slot)) in locations.iter().enumerate() {
+                let page = pf.read_page(page_id).unwrap();
+                let val = page.value_at(slot, 0).unwrap();
+                assert_eq!(val, Value::Int32(i as i32));
+            }
+        }
+
+        cleanup(&path);
+    }
 }
