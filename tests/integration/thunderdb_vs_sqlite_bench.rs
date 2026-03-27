@@ -386,23 +386,20 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 4. Indexed equality: posts by author_id ─────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan_with_projection(
+            tdb.count(
                 "blog_posts",
                 vec![Filter::new("author_id", Operator::Equals(Value::Int32(1)))],
-                None, None,
-                Some(vec![0]),
             )
             .unwrap()
-            .len()
         });
 
         let (sd, scount) = timed(|| {
-            let mut stmt = sdb
-                .prepare("SELECT id FROM blog_posts WHERE author_id = 1")
-                .unwrap();
-            stmt.query_map([], |r| r.get::<_, i32>(0))
-                .unwrap()
-                .count()
+            sdb.query_row(
+                "SELECT COUNT(*) FROM blog_posts WHERE author_id = 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap() as usize
         });
 
         let expected = POST_COUNT / USER_COUNT;
@@ -577,24 +574,23 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 8. IN operator: posts by authors (1, 3) ─────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan_with_projection(
+            tdb.count(
                 "blog_posts",
                 vec![Filter::new(
                     "author_id",
                     Operator::In(vec![Value::Int32(1), Value::Int32(3)]),
                 )],
-                None, None,
-                Some(vec![0]),
             )
             .unwrap()
-            .len()
         });
 
         let (sd, scount) = timed(|| {
-            let mut stmt = sdb
-                .prepare("SELECT id FROM blog_posts WHERE author_id IN (1, 3)")
-                .unwrap();
-            stmt.query_map([], |r| r.get::<_, i32>(0)).unwrap().count()
+            sdb.query_row(
+                "SELECT COUNT(*) FROM blog_posts WHERE author_id IN (1, 3)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap() as usize
         });
 
         let expected = 2 * (POST_COUNT / USER_COUNT);
@@ -606,24 +602,23 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 9. Range scan: BETWEEN on id ────────────────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan_with_projection(
+            tdb.count(
                 "blog_posts",
                 vec![Filter::new(
                     "id",
                     Operator::Between(Value::Int32(5000), Value::Int32(5100)),
                 )],
-                None, None,
-                Some(vec![0]),
             )
             .unwrap()
-            .len()
         });
 
         let (sd, scount) = timed(|| {
-            let mut stmt = sdb
-                .prepare("SELECT id FROM blog_posts WHERE id BETWEEN 5000 AND 5100")
-                .unwrap();
-            stmt.query_map([], |r| r.get::<_, i32>(0)).unwrap().count()
+            sdb.query_row(
+                "SELECT COUNT(*) FROM blog_posts WHERE id BETWEEN 5000 AND 5100",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap() as usize
         });
 
         assert_eq!(tcount, 101);

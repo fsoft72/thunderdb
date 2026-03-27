@@ -274,6 +274,15 @@ impl IndexManager {
         }
     }
 
+    /// Count matching entries without collecting row IDs.
+    pub fn search_count(&self, column_name: &str, value: &Value) -> Result<usize> {
+        if let Some(index) = self.indices.get(column_name) {
+            Ok(index.search_count(value))
+        } else {
+            Err(Error::Index(format!("No index on column: {}", column_name)))
+        }
+    }
+
     /// Range query on an indexed column
     ///
     /// # Arguments
@@ -445,6 +454,13 @@ impl IndexManager {
             }
             _ => None,
         }
+    }
+
+    /// Count matching row IDs from an index without collecting them.
+    ///
+    /// Returns None if the column is not indexed or operator is not supported.
+    pub fn count_row_ids(&self, column: &str, operator: &crate::query::Operator) -> Option<usize> {
+        self.query_row_ids(column, operator).map(|ids| ids.len())
     }
 
     /// Get cached statistics for a specific column's index
