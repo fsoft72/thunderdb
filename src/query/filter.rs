@@ -53,6 +53,33 @@ impl Filter {
         }
     }
 
+    /// Estimated evaluation cost for filter reordering.
+    ///
+    /// Lower cost = cheaper to evaluate. Filters are sorted by cost so that
+    /// cheap checks (null, integer equality) short-circuit before expensive
+    /// ones (LIKE, IN with large lists).
+    pub fn estimated_cost(&self) -> u8 {
+        match &self.operator {
+            Operator::IsNull | Operator::IsNotNull => 1,
+            Operator::Equals(v) | Operator::NotEquals(v) => {
+                if matches!(v, Value::Varchar(_)) { 6 } else { 2 }
+            }
+            Operator::GreaterThan(_)
+            | Operator::GreaterThanOrEqual(_)
+            | Operator::LessThan(_)
+            | Operator::LessThanOrEqual(_) => 3,
+            Operator::Between(_, _) => 4,
+            Operator::In(_) | Operator::NotIn(_) => 5,
+            Operator::Like(_) | Operator::NotLike(_) => {
+                if let Some(ref pat) = self.cached_like {
+                    if pat.can_use_index() { 7 } else { 8 }
+                } else {
+                    8
+                }
+            }
+        }
+    }
+
     /// Evaluate filter against a value
     ///
     /// Uses cached LikePattern for Like/NotLike operators to avoid re-parsing

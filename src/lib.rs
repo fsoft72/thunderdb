@@ -358,6 +358,8 @@ impl DirectDataAccess for Database {
                 } else {
                     // Filtered scan: use callback to filter on raw bytes
                     // before full deserialization
+                    let mut filters = filters;
+                    filters.sort_by_key(|f| f.estimated_cost());
                     let filter_col_indices: Vec<Option<usize>> = filters
                         .iter()
                         .map(|f| {
@@ -393,6 +395,9 @@ impl DirectDataAccess for Database {
             };
             (source, filters)
         };
+
+        let mut active_filters = active_filters;
+        active_filters.sort_by_key(|f| f.estimated_cost());
 
         // Single-pass: filter + offset + limit with early termination
         let offset_val = offset.unwrap_or(0);
