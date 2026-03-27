@@ -351,12 +351,44 @@ impl DirectDataAccess for Database {
                     _ => table_engine.scan_all()?,
                 }
             } else {
-                // No index: push limit into scan when no filters need post-processing
                 if filters.is_empty() {
+                    // No filters: push limit into scan
                     let scan_limit = limit.map(|l| l + offset.unwrap_or(0));
                     table_engine.scan_all_limited(scan_limit)?
                 } else {
-                    table_engine.scan_all()?
+                    // Filtered scan: use callback to filter on raw bytes
+                    // before full deserialization
+                    let filter_col_indices: Vec<Option<usize>> = filters
+                        .iter()
+                        .map(|f| {
+                            if let Some(&idx) = column_mapping.get(&f.column) {
+                                Some(idx)
+                            } else if f.column.starts_with("col") {
+                                f.column[3..].parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let rows = table_engine.scan_all_filtered(|raw_bytes| {
+                        for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
+                            if let Some(idx) = col_idx {
+                                match Row::value_at(raw_bytes, *idx) {
+                                    Ok(val) => {
+                                        if !filter.matches(&val) {
+                                            return false;
+                                        }
+                                    }
+                                    Err(_) => return false,
+                                }
+                            } else {
+                                return false;
+                            }
+                        }
+                        true
+                    })?;
+                    return Ok(apply_pagination(rows, limit, offset));
                 }
             };
             (source, filters)
@@ -455,6 +487,17 @@ impl DirectDataAccess for Database {
         let rows = self.scan(table, filters)?;
         Ok(rows.len())
     }
+}
+
+/// Apply offset and limit to a pre-filtered result set.
+fn apply_pagination(rows: Vec<Row>, limit: Option<usize>, offset: Option<usize>) -> Vec<Row> {
+    let offset_val = offset.unwrap_or(0);
+    let limit_val = limit.unwrap_or(usize::MAX);
+
+    rows.into_iter()
+        .skip(offset_val)
+        .take(limit_val)
+        .collect()
 }
 
 #[cfg(test)]

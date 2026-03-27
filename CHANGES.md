@@ -1,5 +1,13 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Wire callback-based filtered scan into Database::scan_with_limit
+
+- Changed no-index scan path: queries with filters now use `scan_all_filtered()` with a closure
+- The closure uses `Row::value_at()` to extract only filter columns from raw bytes, avoiding full deserialization of non-matching rows
+- Added `apply_pagination()` helper for offset/limit on pre-filtered results
+- Includes `colN` fallback for column index resolution (matching `apply_filters` behavior)
+- All existing tests pass unchanged
+
 ## 2026-03-27 - Add u16 overflow guard to row serialization
 
 - Added bounds check in `Row::write_to()` after building the values buffer: returns an error if the values area exceeds 65535 bytes (u16 offset limit)
