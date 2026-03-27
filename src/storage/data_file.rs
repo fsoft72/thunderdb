@@ -372,6 +372,85 @@ impl DataFile {
         }
     }
 
+    /// Read raw row bytes and pass them to a callback without allocation.
+    ///
+    /// Reads into the internal `read_buffer` and passes a borrowed slice
+    /// to the callback. Zero per-row allocations.
+    /// Returns `None` for tombstoned rows.
+    pub fn read_raw_with<F, R>(
+        &mut self,
+        offset: u64,
+        length: u32,
+        f: F,
+    ) -> Result<Option<R>>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let total_to_read = 1 + 4 + length as usize;
+
+        match &mut self.backend {
+            DataFileBackend::File(writer) => {
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
+                let file = writer.get_mut();
+                file.seek(SeekFrom::Start(offset))?;
+
+                if self.read_buffer.len() < total_to_read {
+                    self.read_buffer.resize(total_to_read, 0);
+                }
+
+                file.read_exact(&mut self.read_buffer[..total_to_read])?;
+
+                if self.read_buffer[0] == TOMBSTONE_MARKER {
+                    return Ok(None);
+                }
+
+                let stored_length = u32::from_le_bytes(
+                    self.read_buffer[1..5].try_into().unwrap(),
+                );
+                if stored_length != length {
+                    return Err(Error::Storage(format!(
+                        "Length mismatch at offset {}: expected {}, found {}",
+                        offset, length, stored_length
+                    )));
+                }
+
+                Ok(Some(f(&self.read_buffer[5..total_to_read])))
+            }
+            DataFileBackend::Memory(data) => {
+                let start = offset as usize;
+                let end = start + total_to_read;
+
+                if end > data.len() {
+                    return Err(Error::Storage(format!(
+                        "Read out of bounds: {} > {}",
+                        end, data.len()
+                    )));
+                }
+
+                let slice = &data[start..end];
+
+                if slice[0] == TOMBSTONE_MARKER {
+                    return Ok(None);
+                }
+
+                let stored_length = u32::from_le_bytes(
+                    slice[1..5].try_into().unwrap(),
+                );
+                if stored_length != length {
+                    return Err(Error::Storage(format!(
+                        "Length mismatch at offset {}: expected {}, found {}",
+                        offset, length, stored_length
+                    )));
+                }
+
+                Ok(Some(f(&slice[5..])))
+            }
+        }
+    }
+
     /// Mark a row as deleted by writing tombstone marker
     ///
     /// # Arguments

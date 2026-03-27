@@ -432,10 +432,15 @@ impl TableEngine {
 
         let mut rows = Vec::with_capacity(entries.len());
         for (offset, length) in entries {
-            if let Some(raw) = self.data_file.read_raw(offset, length)? {
-                if predicate(&raw) {
-                    rows.push(Row::from_bytes(&raw)?);
+            let maybe_row = self.data_file.read_raw_with(offset, length, |raw| {
+                if predicate(raw) {
+                    Some(Row::from_bytes(raw))
+                } else {
+                    None
                 }
+            })?;
+            if let Some(Some(row)) = maybe_row {
+                rows.push(row?);
             }
         }
         Ok(rows)
