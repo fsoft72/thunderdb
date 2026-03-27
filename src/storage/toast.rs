@@ -24,6 +24,112 @@ const MAX_OVERFLOW_DATA: usize = PAGE_SIZE - 24;
 /// Page header size (same as in page.rs).
 const PAGE_HEADER_SIZE: usize = 24;
 
+/// Serialize row values, toasting large VARCHARs to overflow pages.
+///
+/// If the serialized row exceeds TOAST_THRESHOLD, the largest VARCHAR
+/// fields are moved to overflow pages one at a time until the row fits.
+pub fn toast_row(values: &[Value], page_file: &mut PageFile) -> Result<Vec<u8>> {
+    use crate::storage::page::serialize_row_for_page;
+
+    let row_bytes = serialize_row_for_page(values);
+
+    if row_bytes.len() <= TOAST_THRESHOLD {
+        return Ok(row_bytes);
+    }
+
+    // Identify VARCHAR columns and their serialized sizes
+    let mut varchar_cols: Vec<(usize, usize)> = Vec::new(); // (col_index, serialized_size)
+
+    for (i, val) in values.iter().enumerate() {
+        if let Value::Varchar(s) = val {
+            // Serialized size: tag(1) + length(4) + string_bytes
+            let size = 1 + 4 + s.as_bytes().len();
+            varchar_cols.push((i, size));
+        }
+    }
+
+    // Sort by size descending -- toast largest first
+    varchar_cols.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Build a mutable list of values, toasting as needed
+    let mut toasted_values: Vec<ToastedValue> = values
+        .iter()
+        .map(|v| ToastedValue::Inline(v.clone()))
+        .collect();
+
+    for (col_idx, _size) in &varchar_cols {
+        // Re-serialize to check current size
+        let current_bytes = _serialize_toasted_row(&toasted_values)?;
+        if current_bytes.len() <= TOAST_THRESHOLD {
+            return Ok(current_bytes);
+        }
+
+        // Toast this column
+        if let ToastedValue::Inline(Value::Varchar(_)) = &toasted_values[*col_idx] {
+            let val = &values[*col_idx];
+            // Serialize the original value
+            let mut val_bytes = Vec::new();
+            val.write_to(&mut val_bytes)?;
+
+            // Write to overflow
+            let (page_id, offset) = _write_to_overflow(&val_bytes, page_file)?;
+            toasted_values[*col_idx] = ToastedValue::Pointer {
+                page_id,
+                offset,
+                length: val_bytes.len() as u32,
+            };
+        }
+    }
+
+    let final_bytes = _serialize_toasted_row(&toasted_values)?;
+    if final_bytes.len() > TOAST_THRESHOLD {
+        return Err(Error::Storage(format!(
+            "Row still too large after toasting all VARCHARs ({} bytes > {} threshold)",
+            final_bytes.len(),
+            TOAST_THRESHOLD
+        )));
+    }
+    Ok(final_bytes)
+}
+
+/// Internal representation during toasting.
+enum ToastedValue {
+    Inline(Value),
+    Pointer { page_id: u32, offset: u16, length: u32 },
+}
+
+/// Serialize a row with a mix of inline values and TOAST pointers.
+fn _serialize_toasted_row(values: &[ToastedValue]) -> Result<Vec<u8>> {
+    let col_count = values.len();
+
+    // Serialize each value/pointer to compute offsets
+    let mut values_buf = Vec::with_capacity(col_count * 8);
+    let mut offsets: Vec<u16> = Vec::with_capacity(col_count);
+
+    for val in values {
+        offsets.push(values_buf.len() as u16);
+        match val {
+            ToastedValue::Inline(v) => {
+                v.write_to(&mut values_buf)?;
+            }
+            ToastedValue::Pointer { page_id, offset, length } => {
+                values_buf.extend_from_slice(
+                    &encode_toast_pointer(*page_id, *offset, *length),
+                );
+            }
+        }
+    }
+
+    let total = 2 + col_count * 2 + values_buf.len();
+    let mut row = Vec::with_capacity(total);
+    row.extend_from_slice(&(col_count as u16).to_le_bytes());
+    for off in &offsets {
+        row.extend_from_slice(&off.to_le_bytes());
+    }
+    row.extend_from_slice(&values_buf);
+    Ok(row)
+}
+
 /// Encode a TOAST pointer as 11 bytes.
 fn encode_toast_pointer(page_id: u32, offset: u16, length: u32) -> [u8; TOAST_POINTER_SIZE] {
     let mut buf = [0u8; TOAST_POINTER_SIZE];
@@ -134,5 +240,54 @@ mod tests {
     fn test_decode_invalid_pointer() {
         assert!(decode_toast_pointer(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
         assert!(decode_toast_pointer(&[TOAST_TAG, 0, 0]).is_err()); // too short
+    }
+
+    use crate::storage::page::serialize_row_for_page;
+    use std::path::PathBuf;
+    use std::fs;
+
+    fn temp_path(name: &str) -> PathBuf {
+        let dir = PathBuf::from("/tmp/thunderdb_toast_tests");
+        let _ = fs::create_dir_all(&dir);
+        dir.join(name)
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_toast_row_small_row_unchanged() {
+        let path = temp_path("test_small.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let values = vec![Value::Int32(42), Value::varchar("short".to_string())];
+        let result = toast_row(&values, &mut pf).unwrap();
+
+        // Should be identical to serialize_row_for_page
+        let expected = serialize_row_for_page(&values);
+        assert_eq!(result, expected);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_toast_row_large_varchar_toasted() {
+        let path = temp_path("test_large.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let big_string = "x".repeat(3000);
+        let values = vec![Value::Int32(1), Value::varchar(big_string)];
+        let result = toast_row(&values, &mut pf).unwrap();
+
+        // Result should be smaller than TOAST_THRESHOLD
+        assert!(result.len() <= TOAST_THRESHOLD);
+
+        // Should contain a TOAST pointer (tag 0x07)
+        assert!(result.iter().any(|&b| b == TOAST_TAG));
+
+        cleanup(&path);
     }
 }
