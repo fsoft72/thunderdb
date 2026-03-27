@@ -453,6 +453,18 @@ impl TableEngine {
         self.data_file.scan_rows_limited(limit)
     }
 
+    /// Scan active rows with a callback predicate on raw bytes.
+    ///
+    /// The predicate receives the raw serialized row bytes (without the
+    /// data-file marker/length envelope). Use `Row::value_at()` inside the
+    /// predicate to extract individual columns for filtering.
+    pub fn scan_all_filtered<F>(&mut self, predicate: F) -> Result<Vec<Row>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        self.data_file.scan_rows_callback(None, predicate)
+    }
+
     /// Get table statistics
     pub fn stats(&self) -> TableStats {
         TableStats {

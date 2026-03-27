@@ -469,6 +469,97 @@ impl DataFile {
         self.scan_rows_limited(None)
     }
 
+    /// Scan active rows, applying a callback filter on raw bytes.
+    ///
+    /// For each active row, passes the raw byte buffer to `predicate`.
+    /// If it returns `true`, the row is fully deserialized and included.
+    /// If `false`, the row is skipped without deserialization.
+    pub fn scan_rows_callback<F>(
+        &mut self,
+        limit: Option<usize>,
+        predicate: F,
+    ) -> Result<Vec<Row>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let max_rows = limit.unwrap_or(usize::MAX);
+        let mut results = Vec::new();
+        let mut row_buffer = Vec::with_capacity(1024);
+
+        match &mut self.backend {
+            DataFileBackend::File(writer) => {
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
+                let file = writer.get_mut();
+                file.seek(SeekFrom::Start(0))?;
+
+                let mut reader = BufReader::with_capacity(256 * 1024, &*file);
+                loop {
+                    if results.len() >= max_rows {
+                        break;
+                    }
+                    let mut marker = [0u8; 1];
+                    match reader.read_exact(&mut marker) {
+                        Ok(_) => {}
+                        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => return Err(e.into()),
+                    }
+
+                    let mut length_buf = [0u8; 4];
+                    reader.read_exact(&mut length_buf)?;
+                    let length = u32::from_le_bytes(length_buf) as usize;
+
+                    if marker[0] == TOMBSTONE_MARKER {
+                        std::io::copy(
+                            &mut reader.by_ref().take(length as u64),
+                            &mut std::io::sink(),
+                        )?;
+                    } else {
+                        if row_buffer.len() < length {
+                            row_buffer.resize(length, 0);
+                        }
+                        reader.read_exact(&mut row_buffer[..length])?;
+                        if predicate(&row_buffer[..length]) {
+                            results.push(Row::from_bytes(&row_buffer[..length])?);
+                        }
+                    }
+                }
+            }
+            DataFileBackend::Memory(data) => {
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    if results.len() >= max_rows {
+                        break;
+                    }
+                    if cursor + 1 + 4 > data.len() {
+                        break;
+                    }
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let length = u32::from_le_bytes(
+                        data[cursor..cursor + 4].try_into().unwrap(),
+                    ) as usize;
+                    cursor += 4;
+
+                    if cursor + length > data.len() {
+                        break;
+                    }
+                    if marker != TOMBSTONE_MARKER {
+                        if predicate(&data[cursor..cursor + length]) {
+                            results.push(Row::from_bytes(&data[cursor..cursor + length])?);
+                        }
+                    }
+                    cursor += length;
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Scan all rows in the file (for recovery/rebuild)
     ///
     /// Returns vector of (offset, length, row_id, deleted) tuples
