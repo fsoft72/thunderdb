@@ -1,16 +1,11 @@
 # ThunderDB Changes
 
-## 2026-03-27 - Wire filtered fetch into indexed scan paths
+## 2026-03-27 - Query optimizer improvements
 
-- **Multi-index path**: When multi-index intersection returns row IDs with remaining filters, uses `get_by_ids_filtered()` with a predicate closure to filter on raw bytes before full deserialization, instead of `get_by_ids()` + post-filter
-- **Single-index path**: Refactored to first try `query_row_ids()` for direct row ID retrieval, then applies remaining filters via `get_by_ids_filtered()` predicate; falls back to old `*_by_index()` methods only when `query_row_ids` returns None
-- Both paths set `active_filters` to empty when predicate filtering was applied, avoiding redundant post-filter passes
-
-## 2026-03-27 - Optimized count() with index-only and callback paths
-
-- **Index-only count**: `Database::count()` now returns index cardinality directly when all filters are covered by indices, avoiding data file I/O entirely
-- **Callback count**: When indices are unavailable, uses `count_filtered()` with `Row::value_at()` to evaluate predicates on raw bytes without allocating `Row` objects
-- Both multi-index intersection and single-index paths are tried before falling back to the callback scan
+- **Filter cost-based reordering**: Filters sorted by estimated cost before evaluation — cheap checks (null, integer equality) short-circuit before expensive ones (LIKE, IN)
+- **Optimized COUNT with filters**: Index-only counting when all filters are indexable (zero data file I/O); callback counting for non-indexed filters (no row materialization)
+- **Partial deserialization on indexed paths**: `get_by_ids_filtered()` applies remaining filters via `Row::value_at()` on raw bytes before full deserialization, avoiding unnecessary column construction
+- **New methods**: `DataFile::read_raw()`, `DataFile::count_rows_callback()`, `TableEngine::get_by_ids_filtered()`, `TableEngine::count_filtered()`, `Filter::estimated_cost()`
 
 ## 2026-03-27 - Text matching performance optimizations
 
