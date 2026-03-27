@@ -10,6 +10,7 @@ use crate::storage::page_file::PageFile;
 use crate::storage::toast;
 use crate::storage::value::Value;
 use crate::storage::row::Row;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Rows larger than this (serialized bytes) trigger TOAST.
@@ -225,6 +226,91 @@ impl PagedTable {
         }
 
         Ok(count)
+    }
+
+    /// Fetch multiple rows by ctid, grouping reads by page_id.
+    ///
+    /// Reads each page at most once, extracting all requested slots
+    /// from that page before moving on. Results are returned in
+    /// arbitrary order.
+    pub fn get_rows_by_ctids(&mut self, ctids: &[Ctid]) -> Result<Vec<Row>> {
+        let mut by_page: HashMap<u32, Vec<u16>> = HashMap::new();
+        for ctid in ctids {
+            by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
+        }
+
+        let mut rows = Vec::with_capacity(ctids.len());
+        let page_count = self.page_file.page_count();
+
+        for (page_id, slots) in &by_page {
+            if *page_id >= page_count {
+                continue;
+            }
+
+            let page = self.page_file.read_page(*page_id)?;
+
+            for &slot in slots {
+                let raw = match page.get_row(slot) {
+                    Some(bytes) => bytes.to_vec(),
+                    None => continue,
+                };
+
+                let detoasted = toast::detoast_row_bytes(&raw, &mut self.page_file)?;
+                let values = _parse_page_row_values(&detoasted)?;
+                let row_id = Ctid::new(*page_id, slot).to_u64();
+                rows.push(Row::new(row_id, values));
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Fetch multiple rows by ctid with a raw-bytes predicate filter.
+    ///
+    /// Same page-grouping strategy as `get_rows_by_ctids`, but only
+    /// detoasts and deserializes rows whose raw bytes pass the predicate.
+    pub fn get_rows_by_ctids_filtered<F>(
+        &mut self,
+        ctids: &[Ctid],
+        predicate: F,
+    ) -> Result<Vec<Row>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let mut by_page: HashMap<u32, Vec<u16>> = HashMap::new();
+        for ctid in ctids {
+            by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
+        }
+
+        let mut rows = Vec::with_capacity(ctids.len());
+        let page_count = self.page_file.page_count();
+
+        for (page_id, slots) in &by_page {
+            if *page_id >= page_count {
+                continue;
+            }
+
+            let page = self.page_file.read_page(*page_id)?;
+
+            for &slot in slots {
+                let raw = match page.get_row(slot) {
+                    Some(bytes) => bytes,
+                    None => continue,
+                };
+
+                if !predicate(raw) {
+                    continue;
+                }
+
+                let raw_owned = raw.to_vec();
+                let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                let values = _parse_page_row_values(&detoasted)?;
+                let row_id = Ctid::new(*page_id, slot).to_u64();
+                rows.push(Row::new(row_id, values));
+            }
+        }
+
+        Ok(rows)
     }
 
     /// Return the number of active (non-deleted) rows.
@@ -482,6 +568,74 @@ mod tests {
 
         let count_none = pt.count_filtered(|_bytes| false).unwrap();
         assert_eq!(count_none, 0);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_rows_by_ctids() {
+        let path = temp_path("test_batch_ctids.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let mut ctids = Vec::new();
+        for i in 0..20 {
+            let ctid = pt.insert_row(&[Value::Int32(i), Value::varchar(format!("row_{}", i))]).unwrap();
+            ctids.push(ctid);
+        }
+
+        // Fetch 5 specific rows
+        let fetch = vec![ctids[2], ctids[7], ctids[11], ctids[15], ctids[19]];
+        let rows = pt.get_rows_by_ctids(&fetch).unwrap();
+        assert_eq!(rows.len(), 5);
+
+        let mut found: Vec<i32> = rows.iter().map(|r| {
+            if let Value::Int32(v) = r.values[0] { v } else { panic!("expected Int32") }
+        }).collect();
+        found.sort();
+        assert_eq!(found, vec![2, 7, 11, 15, 19]);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_rows_by_ctids_with_missing() {
+        let path = temp_path("test_batch_missing.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        let ctid = pt.insert_row(&[Value::Int32(1)]).unwrap();
+
+        // Request existing + non-existing ctids
+        let fetch = vec![ctid, Ctid::new(999, 0), Ctid::new(1, 99)];
+        let rows = pt.get_rows_by_ctids(&fetch).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values[0], Value::Int32(1));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_rows_by_ctids_filtered() {
+        let path = temp_path("test_batch_filter.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let mut ctids = Vec::new();
+        for i in 0..20 {
+            let ctid = pt.insert_row(&[Value::Int32(i)]).unwrap();
+            ctids.push(ctid);
+        }
+
+        // Fetch all 20 ctids but filter: accept all
+        let all = pt.get_rows_by_ctids_filtered(&ctids, |_| true).unwrap();
+        assert_eq!(all.len(), 20);
+
+        // Fetch all 20 ctids but filter: reject all
+        let none = pt.get_rows_by_ctids_filtered(&ctids, |_| false).unwrap();
+        assert_eq!(none.len(), 0);
 
         cleanup(&path);
     }
