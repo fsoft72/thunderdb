@@ -1,5 +1,13 @@
 # ThunderDB Changes
 
+## 2026-03-27 - PageFile + FSM (sub-project 2)
+
+- **Multi-page file manager**: `PageFile` manages a file as a sequence of 8KB pages with mmap for zero-copy reads
+- **Free Space Map**: Page 0 stores 1-byte-per-page free space tracking (32-byte granularity), enabling O(n) page lookup for inserts
+- **Page allocation**: `allocate_page()` extends the file, `find_page_with_space()` scans FSM or allocates when full
+- **Persistence**: Pages survive reopen; FSM is stored in the file alongside data pages
+- New file: `src/storage/page_file.rs`
+
 ## 2026-03-27 - Slotted page storage (sub-project 1: Page struct)
 
 - **8KB slotted page format**: Page header (24 bytes) + slot directory (grows forward) + row data (grows backward), supporting insert, get, delete, and compaction
