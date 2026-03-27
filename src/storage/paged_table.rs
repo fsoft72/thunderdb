@@ -71,6 +71,58 @@ impl PagedTable {
         Ok(Ctid::new(page_id, slot_index))
     }
 
+    /// Insert multiple rows in a single batch.
+    ///
+    /// Keeps a hot page in memory and fills it before writing. When the
+    /// page is full it is flushed once and a new page is allocated.
+    /// This avoids the per-row read-modify-write cycle and the implicit
+    /// `sync_all()` between each write and read that plagues single inserts.
+    pub fn insert_batch(&mut self, rows_values: &[Vec<Value>]) -> Result<Vec<Ctid>> {
+        if rows_values.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Serialize all rows (with TOAST if needed)
+        let mut serialized = Vec::with_capacity(rows_values.len());
+        for values in rows_values {
+            let row_bytes = serialize_row_for_page(values);
+            let data = if row_bytes.len() > TOAST_THRESHOLD {
+                toast::toast_row(values, &mut self.page_file)?
+            } else {
+                row_bytes
+            };
+            serialized.push(data);
+        }
+
+        // 2. Load the first page with space (single FSM scan + page read)
+        let mut ctids = Vec::with_capacity(serialized.len());
+        let mut cur_page_id = self.page_file.find_page_with_space(serialized[0].len())?;
+        let mut cur_page = self.page_file.read_page(cur_page_id)?;
+
+        for data in &serialized {
+            if !cur_page.can_fit(data.len()) {
+                // Flush full page: one write + one FSM update
+                self.page_file.write_page(&cur_page)?;
+                self.page_file.update_fsm(cur_page_id, cur_page.free_space())?;
+
+                // Allocate a fresh page (no read needed — Page::new is in-memory)
+                cur_page_id = self.page_file.allocate_page()?;
+                cur_page = Page::new(cur_page_id);
+            }
+
+            let slot = cur_page.insert_row(data)?;
+            ctids.push(Ctid::new(cur_page_id, slot));
+        }
+
+        // 3. Flush the last page
+        self.page_file.write_page(&cur_page)?;
+        self.page_file.update_fsm(cur_page_id, cur_page.free_space())?;
+
+        self.active_count += ctids.len() as u64;
+
+        Ok(ctids)
+    }
+
     /// Get a row by its ctid.
     ///
     /// Reads the page, extracts the raw slot bytes, detoasts if needed,
@@ -636,6 +688,63 @@ mod tests {
         // Fetch all 20 ctids but filter: reject all
         let none = pt.get_rows_by_ctids_filtered(&ctids, |_| false).unwrap();
         assert_eq!(none.len(), 0);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_insert_batch() {
+        let path = temp_path("test_insert_batch.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let rows: Vec<Vec<Value>> = (0..200)
+            .map(|i| vec![Value::Int32(i), Value::varchar(format!("batch_row_{}", i))])
+            .collect();
+
+        let ctids = pt.insert_batch(&rows).unwrap();
+        assert_eq!(ctids.len(), 200);
+        assert_eq!(pt.active_row_count(), 200);
+
+        // Verify every row is retrievable
+        for (i, ctid) in ctids.iter().enumerate() {
+            let row = pt.get_row(*ctid).unwrap().expect("row should exist");
+            assert_eq!(row.values[0], Value::Int32(i as i32));
+        }
+
+        // scan_all should return all 200
+        let all = pt.scan_all().unwrap();
+        assert_eq!(all.len(), 200);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_insert_batch_spans_pages() {
+        let path = temp_path("test_batch_pages.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        // Each row ~120 bytes → ~60 rows per 8KB page → 500 rows = ~8 pages
+        let rows: Vec<Vec<Value>> = (0..500)
+            .map(|i| vec![
+                Value::Int64(i),
+                Value::varchar(format!("value_{:0>80}", i)),
+            ])
+            .collect();
+
+        let ctids = pt.insert_batch(&rows).unwrap();
+        assert_eq!(ctids.len(), 500);
+        assert_eq!(pt.active_row_count(), 500);
+
+        // Verify data integrity at boundaries
+        let first = pt.get_row(ctids[0]).unwrap().unwrap();
+        assert_eq!(first.values[0], Value::Int64(0));
+
+        let last = pt.get_row(ctids[499]).unwrap().unwrap();
+        assert_eq!(last.values[0], Value::Int64(499));
 
         cleanup(&path);
     }

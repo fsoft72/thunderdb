@@ -1,5 +1,11 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Batch insert optimization
+
+- **PagedTable::insert_batch()**: Hot-page strategy fills pages in memory before flushing
+- Eliminates per-row read-modify-write cycle and implicit fsync between writes and reads
+- Setup benchmark: 295ms → 51ms (5.8x faster), ratio vs SQLite: 8.31x → 1.60x
+
 ## 2026-03-27 - Slotted page storage migration complete (sub-project 4)
 
 - **PagedTable**: New CRUD layer over PageFile+Page+TOAST, replaces DataFile+RAT

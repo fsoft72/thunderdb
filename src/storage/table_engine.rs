@@ -225,7 +225,9 @@ impl TableEngine {
 
     /// Insert multiple rows in batch
     ///
-    /// Inserts each row individually via PagedTable and batches index updates.
+    /// Uses PagedTable::insert_batch for efficient page-level batching
+    /// (single read-write per page instead of per row), then batches
+    /// index updates.
     ///
     /// # Arguments
     /// * `rows` - Vector of value vectors to insert
@@ -237,17 +239,15 @@ impl TableEngine {
             return Ok(Vec::new());
         }
 
-        let mut row_ids = Vec::with_capacity(rows.len());
-        let mut row_objects = Vec::with_capacity(rows.len());
-
-        for values in rows {
-            let ctid = self.paged_table.insert_row(&values)?;
-            let row_id = ctid.to_u64();
-            row_objects.push(Row::new(row_id, values));
-            row_ids.push(row_id);
-        }
+        let ctids = self.paged_table.insert_batch(&rows)?;
+        let row_ids: Vec<u64> = ctids.iter().map(|c| c.to_u64()).collect();
 
         if !self.index_manager.indexed_columns().is_empty() {
+            let row_objects: Vec<Row> = row_ids
+                .iter()
+                .zip(rows.into_iter())
+                .map(|(&id, values)| Row::new(id, values))
+                .collect();
             let mapping = self.build_column_mapping();
             self.index_manager.insert_rows_batch(&row_objects, &mapping)?;
         }
