@@ -13,6 +13,7 @@ pub mod rat;
 pub mod data_file;
 pub mod table_engine;
 pub mod small_string;
+pub mod page;
 
 pub use value::Value;
 pub use row::Row;
