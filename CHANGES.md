@@ -1,5 +1,11 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Wire filtered fetch into indexed scan paths
+
+- **Multi-index path**: When multi-index intersection returns row IDs with remaining filters, uses `get_by_ids_filtered()` with a predicate closure to filter on raw bytes before full deserialization, instead of `get_by_ids()` + post-filter
+- **Single-index path**: Refactored to first try `query_row_ids()` for direct row ID retrieval, then applies remaining filters via `get_by_ids_filtered()` predicate; falls back to old `*_by_index()` methods only when `query_row_ids` returns None
+- Both paths set `active_filters` to empty when predicate filtering was applied, avoiding redundant post-filter passes
+
 ## 2026-03-27 - Optimized count() with index-only and callback paths
 
 - **Index-only count**: `Database::count()` now returns index cardinality directly when all filters are covered by indices, avoiding data file I/O entirely

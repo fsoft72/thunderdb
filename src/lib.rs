@@ -323,77 +323,157 @@ impl DirectDataAccess for Database {
         );
 
         let (source_rows, active_filters) = if let Some(row_ids) = multi_result {
-            let rows = table_engine.get_by_ids(&row_ids)?;
-            (rows, remaining_filters)
+            if remaining_filters.is_empty() {
+                let rows = table_engine.get_by_ids(&row_ids)?;
+                (rows, remaining_filters)
+            } else {
+                let mut remaining_filters = remaining_filters;
+                remaining_filters.sort_by_key(|f| f.estimated_cost());
+                let rem_col_indices: Vec<Option<usize>> = remaining_filters
+                    .iter()
+                    .map(|f| {
+                        if let Some(&idx) = column_mapping.get(&f.column) {
+                            Some(idx)
+                        } else if f.column.starts_with("col") {
+                            f.column[3..].parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let rows = table_engine.get_by_ids_filtered(&row_ids, |raw_bytes| {
+                    for (filter, col_idx) in remaining_filters.iter().zip(rem_col_indices.iter()) {
+                        if let Some(idx) = col_idx {
+                            match Row::value_at(raw_bytes, *idx) {
+                                Ok(val) => {
+                                    if !filter.matches(&val) {
+                                        return false;
+                                    }
+                                }
+                                Err(_) => return false,
+                            }
+                        } else {
+                            return false;
+                        }
+                    }
+                    true
+                })?;
+                (rows, vec![])
+            }
         } else {
             // Strategy 2: Single best index
             let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
-            let source = if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
-                match op {
-                    Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
-                    Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
-                    Operator::GreaterThan(val) => table_engine.greater_than_by_index(&col, &val, false)?,
-                    Operator::GreaterThanOrEqual(val) => table_engine.greater_than_by_index(&col, &val, true)?,
-                    Operator::LessThan(val) => table_engine.less_than_by_index(&col, &val, false)?,
-                    Operator::LessThanOrEqual(val) => table_engine.less_than_by_index(&col, &val, true)?,
-                    Operator::Like(pattern) => {
-                        use crate::index::LikePattern;
-                        if let Ok(lp) = LikePattern::parse(&pattern) {
-                            if let Some(prefix) = lp.get_prefix() {
-                                table_engine.prefix_search_by_index(&col, prefix)?
+            if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
+                if let Some(row_ids) = table_engine.index_manager().query_row_ids(&col, &op) {
+                    // Collect remaining filters (everything except the indexed one)
+                    let remaining: Vec<Filter> = filters
+                        .iter()
+                        .filter(|f| f.column != col || f.operator != op)
+                        .cloned()
+                        .collect();
+
+                    if remaining.is_empty() {
+                        (table_engine.get_by_ids(&row_ids)?, vec![])
+                    } else {
+                        let mut remaining = remaining;
+                        remaining.sort_by_key(|f| f.estimated_cost());
+                        let rem_col_indices: Vec<Option<usize>> = remaining
+                            .iter()
+                            .map(|f| {
+                                if let Some(&idx) = column_mapping.get(&f.column) {
+                                    Some(idx)
+                                } else if f.column.starts_with("col") {
+                                    f.column[3..].parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let rows = table_engine.get_by_ids_filtered(&row_ids, |raw_bytes| {
+                            for (filter, col_idx) in remaining.iter().zip(rem_col_indices.iter()) {
+                                if let Some(idx) = col_idx {
+                                    match Row::value_at(raw_bytes, *idx) {
+                                        Ok(val) => {
+                                            if !filter.matches(&val) {
+                                                return false;
+                                            }
+                                        }
+                                        Err(_) => return false,
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                            true
+                        })?;
+                        (rows, vec![])
+                    }
+                } else {
+                    // query_row_ids returned None — fall back to old path
+                    let source = match op {
+                        Operator::Equals(val) => table_engine.search_by_index(&col, &val)?,
+                        Operator::Between(start, end) => table_engine.range_search_by_index(&col, &start, &end)?,
+                        Operator::GreaterThan(val) => table_engine.greater_than_by_index(&col, &val, false)?,
+                        Operator::GreaterThanOrEqual(val) => table_engine.greater_than_by_index(&col, &val, true)?,
+                        Operator::LessThan(val) => table_engine.less_than_by_index(&col, &val, false)?,
+                        Operator::LessThanOrEqual(val) => table_engine.less_than_by_index(&col, &val, true)?,
+                        Operator::Like(pattern) => {
+                            use crate::index::LikePattern;
+                            if let Ok(lp) = LikePattern::parse(&pattern) {
+                                if let Some(prefix) = lp.get_prefix() {
+                                    table_engine.prefix_search_by_index(&col, prefix)?
+                                } else {
+                                    table_engine.scan_all()?
+                                }
                             } else {
                                 table_engine.scan_all()?
                             }
+                        }
+                        _ => table_engine.scan_all()?,
+                    };
+                    (source, filters)
+                }
+            } else if filters.is_empty() {
+                // No filters: push limit into scan
+                let scan_limit = limit.map(|l| l + offset.unwrap_or(0));
+                (table_engine.scan_all_limited(scan_limit)?, filters)
+            } else {
+                // Filtered scan: use callback to filter on raw bytes
+                // before full deserialization
+                let mut filters = filters;
+                filters.sort_by_key(|f| f.estimated_cost());
+                let filter_col_indices: Vec<Option<usize>> = filters
+                    .iter()
+                    .map(|f| {
+                        if let Some(&idx) = column_mapping.get(&f.column) {
+                            Some(idx)
+                        } else if f.column.starts_with("col") {
+                            f.column[3..].parse::<usize>().ok()
                         } else {
-                            table_engine.scan_all()?
+                            None
+                        }
+                    })
+                    .collect();
+
+                let rows = table_engine.scan_all_filtered(|raw_bytes| {
+                    for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
+                        if let Some(idx) = col_idx {
+                            match Row::value_at(raw_bytes, *idx) {
+                                Ok(val) => {
+                                    if !filter.matches(&val) {
+                                        return false;
+                                    }
+                                }
+                                Err(_) => return false,
+                            }
+                        } else {
+                            return false;
                         }
                     }
-                    _ => table_engine.scan_all()?,
-                }
-            } else {
-                if filters.is_empty() {
-                    // No filters: push limit into scan
-                    let scan_limit = limit.map(|l| l + offset.unwrap_or(0));
-                    table_engine.scan_all_limited(scan_limit)?
-                } else {
-                    // Filtered scan: use callback to filter on raw bytes
-                    // before full deserialization
-                    let mut filters = filters;
-                    filters.sort_by_key(|f| f.estimated_cost());
-                    let filter_col_indices: Vec<Option<usize>> = filters
-                        .iter()
-                        .map(|f| {
-                            if let Some(&idx) = column_mapping.get(&f.column) {
-                                Some(idx)
-                            } else if f.column.starts_with("col") {
-                                f.column[3..].parse::<usize>().ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    let rows = table_engine.scan_all_filtered(|raw_bytes| {
-                        for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
-                            if let Some(idx) = col_idx {
-                                match Row::value_at(raw_bytes, *idx) {
-                                    Ok(val) => {
-                                        if !filter.matches(&val) {
-                                            return false;
-                                        }
-                                    }
-                                    Err(_) => return false,
-                                }
-                            } else {
-                                return false;
-                            }
-                        }
-                        true
-                    })?;
-                    return Ok(apply_pagination(rows, limit, offset));
-                }
-            };
-            (source, filters)
+                    true
+                })?;
+                return Ok(apply_pagination(rows, limit, offset));
+            }
         };
 
         let mut active_filters = active_filters;
