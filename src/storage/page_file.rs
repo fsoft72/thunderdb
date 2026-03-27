@@ -169,6 +169,73 @@ impl PageFile {
         Ok(page_id)
     }
 
+    /// Update the FSM entry for a data page.
+    ///
+    /// Encodes `free_space / 32` as a single byte in the FSM page.
+    pub fn update_fsm(&mut self, page_id: u32, free_space: usize) -> Result<()> {
+        if page_id == 0 {
+            return Err(Error::Storage("Cannot update FSM for page 0 (FSM itself)".to_string()));
+        }
+
+        let fsm_index = (page_id - 1) as usize;
+        if fsm_index >= FSM_CAPACITY {
+            return Err(Error::Storage(format!(
+                "Page {} exceeds FSM capacity (max {})",
+                page_id, FSM_CAPACITY
+            )));
+        }
+
+        let fsm_value = (free_space / FSM_GRANULARITY).min(255) as u8;
+        let byte_offset = FSM_DATA_OFFSET + fsm_index;
+
+        // Write directly to the FSM page in the file
+        self.file.seek(SeekFrom::Start(byte_offset as u64))?;
+        self.file.write_all(&[fsm_value])?;
+        self.stale_mmap = true;
+
+        Ok(())
+    }
+
+    /// Find a data page with enough free space for a row of `needed` bytes.
+    ///
+    /// Scans the FSM linearly. If no page has enough space, allocates a
+    /// new page and returns its ID.
+    pub fn find_page_with_space(&mut self, needed: usize) -> Result<u32> {
+        let required_fsm_value = ((needed + FSM_GRANULARITY - 1) / FSM_GRANULARITY) as u8;
+
+        // Read the FSM page
+        self.remap_if_needed()?;
+
+        let data_pages = self.page_count - 1; // exclude page 0
+
+        if let Some(ref mmap) = self.mmap {
+            for i in 0..data_pages as usize {
+                let byte_offset = FSM_DATA_OFFSET + i;
+                if byte_offset < mmap.len() && mmap[byte_offset] >= required_fsm_value {
+                    return Ok(i as u32 + 1); // page_id = fsm_index + 1
+                }
+            }
+        } else {
+            // Fallback: read FSM bytes from file
+            let mut fsm_buf = vec![0u8; data_pages as usize];
+            self.file.seek(SeekFrom::Start(FSM_DATA_OFFSET as u64))?;
+            self.file.read_exact(&mut fsm_buf)?;
+
+            for (i, &val) in fsm_buf.iter().enumerate() {
+                if val >= required_fsm_value {
+                    return Ok(i as u32 + 1);
+                }
+            }
+        }
+
+        // No page with enough space — allocate a new one
+        let new_page_id = self.allocate_page()?;
+        // New page has full free space
+        let new_free = PAGE_SIZE - FSM_DATA_OFFSET; // approximate (header already accounts for space)
+        self.update_fsm(new_page_id, new_free)?;
+        Ok(new_page_id)
+    }
+
     /// Total number of pages (including FSM page 0).
     pub fn page_count(&self) -> u32 {
         self.page_count
@@ -247,6 +314,72 @@ mod tests {
         // Reopen
         let pf = PageFile::open(&path).unwrap();
         assert_eq!(pf.page_count(), 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_update_and_read_fsm() {
+        let path = temp_path("test_fsm.pages");
+        cleanup(&path);
+
+        let mut pf = PageFile::open(&path).unwrap();
+        let p1 = pf.allocate_page().unwrap();
+        let p2 = pf.allocate_page().unwrap();
+
+        // Mark p1 as having 4000 bytes free, p2 as full
+        pf.update_fsm(p1, 4000).unwrap();
+        pf.update_fsm(p2, 0).unwrap();
+
+        // Should find p1 for a 100-byte row
+        let found = pf.find_page_with_space(100).unwrap();
+        assert_eq!(found, p1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_find_page_allocates_when_full() {
+        let path = temp_path("test_fsm_alloc.pages");
+        cleanup(&path);
+
+        let mut pf = PageFile::open(&path).unwrap();
+        let p1 = pf.allocate_page().unwrap();
+
+        // Mark p1 as full
+        pf.update_fsm(p1, 0).unwrap();
+
+        // Should allocate a new page
+        let initial_count = pf.page_count();
+        let found = pf.find_page_with_space(100).unwrap();
+        assert_eq!(pf.page_count(), initial_count + 1);
+        assert_eq!(found, initial_count); // the newly allocated page
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_fsm_find_best_fit() {
+        let path = temp_path("test_fsm_fit.pages");
+        cleanup(&path);
+
+        let mut pf = PageFile::open(&path).unwrap();
+        let p1 = pf.allocate_page().unwrap();
+        let p2 = pf.allocate_page().unwrap();
+        let p3 = pf.allocate_page().unwrap();
+
+        // p1: 1000 free, p2: 200 free, p3: 5000 free
+        pf.update_fsm(p1, 1000).unwrap();
+        pf.update_fsm(p2, 200).unwrap();
+        pf.update_fsm(p3, 5000).unwrap();
+
+        // Need 500 bytes → first fit is p1 (1000 >= 500)
+        let found = pf.find_page_with_space(500).unwrap();
+        assert_eq!(found, p1);
+
+        // Need 2000 bytes → p1 too small, p2 too small, p3 fits
+        let found = pf.find_page_with_space(2000).unwrap();
+        assert_eq!(found, p3);
 
         cleanup(&path);
     }
