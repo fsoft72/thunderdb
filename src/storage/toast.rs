@@ -151,6 +151,77 @@ fn decode_toast_pointer(bytes: &[u8]) -> Result<(u32, u16, u32)> {
     Ok((page_id, offset, length))
 }
 
+/// Resolve TOAST pointers in raw row bytes.
+///
+/// Scans each value's type tag. For TOAST_TAG (0x07), reads the overflow
+/// page and substitutes the original data. Returns fully detoasted row bytes.
+pub fn detoast_row_bytes(row_bytes: &[u8], page_file: &mut PageFile) -> Result<Vec<u8>> {
+    if row_bytes.len() < 2 {
+        return Err(Error::Serialization("Row too short".to_string()));
+    }
+
+    let col_count = u16::from_le_bytes(row_bytes[0..2].try_into().unwrap()) as usize;
+    let offsets_start = 2;
+    let values_area_start = offsets_start + col_count * 2;
+
+    // Check if any TOAST pointers exist (quick scan)
+    let has_toast = row_bytes[values_area_start..].iter().any(|&b| b == TOAST_TAG);
+    if !has_toast {
+        return Ok(row_bytes.to_vec());
+    }
+
+    // Walk through values, resolving TOAST pointers
+    let mut new_values_buf = Vec::with_capacity(row_bytes.len());
+    let mut new_offsets: Vec<u16> = Vec::with_capacity(col_count);
+    let mut cursor = values_area_start;
+
+    for _col in 0..col_count {
+        new_offsets.push(new_values_buf.len() as u16);
+
+        if cursor >= row_bytes.len() {
+            return Err(Error::Serialization("Unexpected end of row data".to_string()));
+        }
+
+        let tag = row_bytes[cursor];
+
+        if tag == TOAST_TAG {
+            // Resolve TOAST pointer
+            let (page_id, offset, length) = decode_toast_pointer(&row_bytes[cursor..])?;
+            cursor += TOAST_POINTER_SIZE;
+
+            // Read overflow data
+            let page = page_file.read_page(page_id)?;
+            let page_bytes = page.to_bytes();
+            let data_start = PAGE_HEADER_SIZE + offset as usize;
+            let data_end = data_start + length as usize;
+
+            if data_end > PAGE_SIZE {
+                return Err(Error::Storage(format!(
+                    "TOAST data overflows page boundary: {} > {}",
+                    data_end, PAGE_SIZE
+                )));
+            }
+
+            new_values_buf.extend_from_slice(&page_bytes[data_start..data_end]);
+        } else {
+            // Inline value -- determine its size and copy
+            let (_, consumed) = Value::from_bytes(&row_bytes[cursor..])?;
+            new_values_buf.extend_from_slice(&row_bytes[cursor..cursor + consumed]);
+            cursor += consumed;
+        }
+    }
+
+    // Rebuild row: col_count + new offsets + new values
+    let mut result = Vec::with_capacity(2 + col_count * 2 + new_values_buf.len());
+    result.extend_from_slice(&(col_count as u16).to_le_bytes());
+    for off in &new_offsets {
+        result.extend_from_slice(&off.to_le_bytes());
+    }
+    result.extend_from_slice(&new_values_buf);
+
+    Ok(result)
+}
+
 /// Write data to an overflow page, allocating a new one if needed.
 ///
 /// Returns (page_id, offset_within_data_area).
@@ -287,6 +358,65 @@ mod tests {
 
         // Should contain a TOAST pointer (tag 0x07)
         assert!(result.iter().any(|&b| b == TOAST_TAG));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_detoast_roundtrip() {
+        let path = temp_path("test_detoast.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let big_string = "y".repeat(3000);
+        let values = vec![
+            Value::Int32(99),
+            Value::varchar(big_string.clone()),
+            Value::Int64(123),
+        ];
+
+        let toasted = toast_row(&values, &mut pf).unwrap();
+        assert!(toasted.len() <= TOAST_THRESHOLD);
+
+        // Detoast should recover original data
+        let detoasted = detoast_row_bytes(&toasted, &mut pf).unwrap();
+        let original = serialize_row_for_page(&values);
+        assert_eq!(detoasted, original);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_detoast_no_toast_pointers() {
+        let path = temp_path("test_detoast_noop.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let values = vec![Value::Int32(1), Value::varchar("small".to_string())];
+        let row_bytes = serialize_row_for_page(&values);
+
+        // No toast pointers -- should return identical bytes
+        let detoasted = detoast_row_bytes(&row_bytes, &mut pf).unwrap();
+        assert_eq!(detoasted, row_bytes);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_detoast_multiple_toasted_fields() {
+        let path = temp_path("test_detoast_multi.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let values = vec![
+            Value::varchar("a".repeat(1500)),
+            Value::varchar("b".repeat(1500)),
+        ];
+
+        let toasted = toast_row(&values, &mut pf).unwrap();
+        let detoasted = detoast_row_bytes(&toasted, &mut pf).unwrap();
+        let original = serialize_row_for_page(&values);
+        assert_eq!(detoasted, original);
 
         cleanup(&path);
     }
