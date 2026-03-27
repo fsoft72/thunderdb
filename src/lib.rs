@@ -502,6 +502,33 @@ impl DirectDataAccess for Database {
         Ok(result)
     }
 
+    fn scan_with_projection(
+        &mut self,
+        table: &str,
+        filters: Vec<Filter>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        projection: Option<Vec<usize>>,
+    ) -> Result<Vec<Row>> {
+        let rows = self.scan_with_limit(table, filters, limit, offset)?;
+
+        if let Some(ref cols) = projection {
+            let mut projected = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut values = Vec::with_capacity(cols.len());
+                for &idx in cols {
+                    if let Some(val) = row.values.get(idx) {
+                        values.push(val.clone());
+                    }
+                }
+                projected.push(Row::new(row.row_id, values));
+            }
+            Ok(projected)
+        } else {
+            Ok(rows)
+        }
+    }
+
     fn update(
         &mut self,
         table: &str,

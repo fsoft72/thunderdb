@@ -71,6 +71,19 @@ pub trait DirectDataAccess {
         offset: Option<usize>,
     ) -> Result<Vec<Row>>;
 
+    /// Scan table with filters, limits, and column projection
+    ///
+    /// When `projection` is `Some`, only the specified column indices are
+    /// included in the result rows.
+    fn scan_with_projection(
+        &mut self,
+        table: &str,
+        filters: Vec<Filter>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        projection: Option<Vec<usize>>,
+    ) -> Result<Vec<Row>>;
+
     /// Update rows matching filters
     ///
     /// # Arguments
