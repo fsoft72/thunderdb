@@ -1,5 +1,11 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Optimized count() with index-only and callback paths
+
+- **Index-only count**: `Database::count()` now returns index cardinality directly when all filters are covered by indices, avoiding data file I/O entirely
+- **Callback count**: When indices are unavailable, uses `count_filtered()` with `Row::value_at()` to evaluate predicates on raw bytes without allocating `Row` objects
+- Both multi-index intersection and single-index paths are tried before falling back to the callback scan
+
 ## 2026-03-27 - Text matching performance optimizations
 
 - **memchr SIMD LIKE matching**: `LikePattern` now uses `memchr::memmem::Finder` for `Contains` patterns with pre-built SIMD lookup tables; `Prefix`/`Suffix` use byte-slice comparison

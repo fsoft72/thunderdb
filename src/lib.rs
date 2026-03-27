@@ -483,14 +483,75 @@ impl DirectDataAccess for Database {
         Ok(row_ids.len())
     }
 
+    /// Count rows matching the given filters, using index-only or callback paths
+    /// to avoid materializing full Row objects.
     fn count(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
-        // Fast path: no filters means we can use the cached active_count
+        let table_engine = self.get_table_mut(table)?;
+
+        // Fast path: no filters → O(1) from RAT
         if filters.is_empty() {
-            let table_engine = self.get_table_mut(table)?;
             return Ok(table_engine.active_row_count());
         }
-        let rows = self.scan(table, filters)?;
-        Ok(rows.len())
+
+        let column_mapping = table_engine.build_column_mapping();
+        let all_stats = table_engine.index_manager().all_stats();
+        let stats_ref = if all_stats.is_empty() { None } else { Some(all_stats) };
+
+        // Path A: try index-only count (no data file I/O)
+        let mut remaining = Vec::new();
+        let multi = multi_index_scan(
+            &filters,
+            table_engine.index_manager(),
+            stats_ref,
+            &mut remaining,
+        );
+        if let Some(row_ids) = multi {
+            if remaining.is_empty() {
+                return Ok(row_ids.len());
+            }
+        }
+
+        // Single index path
+        let indexed_columns = table_engine.index_manager().indexed_columns().to_vec();
+        if let Some((col, op)) = choose_index(&filters, &indexed_columns, stats_ref) {
+            if let Some(row_ids) = table_engine.index_manager().query_row_ids(&col, &op) {
+                if filters.len() == 1 {
+                    return Ok(row_ids.len());
+                }
+            }
+        }
+
+        // Path B: callback count (scan but no Row allocation)
+        let filter_col_indices: Vec<Option<usize>> = filters
+            .iter()
+            .map(|f| {
+                if let Some(&idx) = column_mapping.get(&f.column) {
+                    Some(idx)
+                } else if f.column.starts_with("col") {
+                    f.column[3..].parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        table_engine.count_filtered(|raw_bytes| {
+            for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
+                if let Some(idx) = col_idx {
+                    match Row::value_at(raw_bytes, *idx) {
+                        Ok(val) => {
+                            if !filter.matches(&val) {
+                                return false;
+                            }
+                        }
+                        Err(_) => return false,
+                    }
+                } else {
+                    return false;
+                }
+            }
+            true
+        })
     }
 }
 
