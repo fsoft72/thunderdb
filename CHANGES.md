@@ -1,5 +1,13 @@
 # ThunderDB Changes
 
+## 2026-03-27 - ThunderDB vs SQLite3 comparison benchmark
+
+- New integration test: `tests/integration/thunderdb_vs_sqlite_bench.rs`
+- Runs the same 11 operations on both ThunderDB and SQLite3 (via rusqlite bundled)
+- Operations: setup, COUNT(*), LIKE prefix, indexed equality, post+comments join, 3-table join, recent posts page, IN operator, BETWEEN range, full scan, COUNT WHERE
+- Prints a side-by-side timing table with ratio and winner indicator
+- Added `rusqlite` (bundled) as dev-dependency
+
 ## 2026-03-26 - SQL JOIN support
 
 - INNER JOIN, LEFT JOIN, RIGHT JOIN with multi-table chaining
