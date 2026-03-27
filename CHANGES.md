@@ -1,5 +1,13 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Slotted page storage (sub-project 1: Page struct)
+
+- **8KB slotted page format**: Page header (24 bytes) + slot directory (grows forward) + row data (grows backward), supporting insert, get, delete, and compaction
+- **Ctid addressing**: Physical row address `(page_id: u32, slot_index: u16)` packing into u64 for B-tree index compatibility
+- **Page row format**: Compact serialization with u16 col_count, no row_id — identity derived from ctid
+- **Single-column extraction**: `Page::value_at()` uses column-offset array for O(1) column access without full deserialization
+- New file: `src/storage/page.rs`
+
 ## 2026-03-27 - Storage and I/O optimizations
 
 - **SmallString INLINE_CAP 32**: Inline storage threshold increased from 23 to 32 bytes, eliminating heap allocation for most short strings

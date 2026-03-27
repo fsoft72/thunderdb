@@ -584,4 +584,46 @@ mod tests {
         // Invalid slot
         assert!(page.value_at(99, 0).is_err());
     }
+
+    #[test]
+    fn test_full_roundtrip_with_data() {
+        let mut page = Page::new(7);
+
+        for i in 0..10 {
+            let data = serialize_row_for_page(&vec![
+                Value::Int32(i),
+                Value::varchar(format!("text_{}", i)),
+            ]);
+            page.insert_row(&data).unwrap();
+        }
+
+        page.delete_row(3);
+        page.delete_row(7);
+
+        let bytes = page.to_bytes();
+        let restored = Page::from_bytes(bytes).unwrap();
+
+        assert_eq!(restored.page_id(), 7);
+        assert_eq!(restored.active_count(), 8);
+        assert_eq!(restored.slot_count(), 10);
+
+        for i in 0..10u16 {
+            if i == 3 || i == 7 {
+                assert!(restored.get_row(i).is_none());
+            } else {
+                let val = restored.value_at(i, 0).unwrap();
+                assert_eq!(val, Value::Int32(i as i32));
+            }
+        }
+    }
+
+    #[test]
+    fn test_empty_row() {
+        let mut page = Page::new(0);
+        let data = serialize_row_for_page(&vec![]);
+        let slot = page.insert_row(&data).unwrap();
+        let row = page.get_row(slot).unwrap();
+        let col_count = u16::from_le_bytes(row[0..2].try_into().unwrap());
+        assert_eq!(col_count, 0);
+    }
 }
