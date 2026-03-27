@@ -190,6 +190,13 @@ impl Page {
         self.header.active_count
     }
 
+    /// Get the free_space_start value from the header.
+    ///
+    /// For overflow pages, this serves as the write cursor.
+    pub fn header_free_space_start(&self) -> u16 {
+        self.header.free_space_start
+    }
+
     /// Contiguous free space available in bytes.
     pub fn free_space(&self) -> usize {
         self.header.free_space_end as usize - self.header.free_space_start as usize

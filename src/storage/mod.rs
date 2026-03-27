@@ -15,6 +15,7 @@ pub mod table_engine;
 pub mod small_string;
 pub mod page;
 pub mod page_file;
+pub mod toast;
 
 pub use value::Value;
 pub use row::Row;
