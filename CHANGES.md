@@ -1,5 +1,14 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Add column-offset array to Row serialization
+
+- Changed row binary format: header now includes a u16 offset array between col_count and values
+- Format: `[row_id:8][col_count:4][off0:2]...[offN-1:2][val0]...[valN-1]`
+- Added `Row::value_at(bytes, col_idx)` for O(1) column access without full deserialization
+- Updated `write_to()`, `to_bytes()`, and `from_bytes()` for the new format
+- Added tests: `test_row_format_with_offsets`, `test_value_at_single_column`
+- All existing tests pass unchanged (round-trip format is consistent)
+
 ## 2026-03-27 - Fix LikePattern: safe Finder construction and Eq impl
 
 - Replaced `unsafe` block in `LikePattern::new_contains` with `Finder::into_owned()` for safe, owned SIMD finder
