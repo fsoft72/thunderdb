@@ -1,6 +1,6 @@
 // SmallString optimization - P2.3
 //
-// Inline storage for strings <= 23 bytes, avoiding heap allocation.
+// Inline storage for strings <= 32 bytes, avoiding heap allocation.
 // Most database column values (names, statuses, short IDs) fit inline.
 //
 // The internal representation is private to prevent external construction
@@ -9,12 +9,12 @@
 use std::fmt;
 
 /// Maximum inline capacity in bytes
-const INLINE_CAP: usize = 23;
+const INLINE_CAP: usize = 32;
 
 /// A string type that stores short strings inline (on the stack) and
 /// falls back to heap allocation for longer strings.
 ///
-/// Strings up to 23 bytes are stored in a fixed-size array with zero
+/// Strings up to 32 bytes are stored in a fixed-size array with zero
 /// heap allocation. Longer strings use a standard `String`.
 ///
 /// The internal representation is private — construct via `new()`,
@@ -171,19 +171,19 @@ mod tests {
     }
 
     #[test]
-    fn test_inline_exactly_23() {
-        let s = SmallString::new("12345678901234567890123"); // 23 bytes
+    fn test_inline_exactly_32() {
+        let s = SmallString::new("12345678901234567890123456789012"); // 32 bytes
         assert!(s.is_inline());
-        assert_eq!(s.len(), 23);
-        assert_eq!(s.as_str(), "12345678901234567890123");
+        assert_eq!(s.len(), 32);
+        assert_eq!(s.as_str(), "12345678901234567890123456789012");
     }
 
     #[test]
-    fn test_heap_24_bytes() {
-        let s = SmallString::new("123456789012345678901234"); // 24 bytes
+    fn test_heap_33_bytes() {
+        let s = SmallString::new("123456789012345678901234567890123"); // 33 bytes
         assert!(!s.is_inline());
-        assert_eq!(s.len(), 24);
-        assert_eq!(s.as_str(), "123456789012345678901234");
+        assert_eq!(s.len(), 33);
+        assert_eq!(s.as_str(), "123456789012345678901234567890123");
     }
 
     #[test]
@@ -270,8 +270,8 @@ mod tests {
         assert!(s.is_inline());
         assert_eq!(s.as_str(), "こんにちは");
 
-        // Emoji string that exceeds 23 bytes
-        let long_emoji = "🌍🌎🌏🌍🌎🌏"; // 6 * 4 = 24 bytes
+        // Emoji string that exceeds 32 bytes
+        let long_emoji = "🌍🌎🌏🌍🌎🌏🌍🌎🌏"; // 9 * 4 = 36 bytes
         let s = SmallString::new(long_emoji);
         assert!(!s.is_inline());
         assert_eq!(s.as_str(), long_emoji);
