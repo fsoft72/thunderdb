@@ -728,16 +728,16 @@ mod tests {
 
         let mut df = DataFile::open(path, false).unwrap();
 
-        // Create a row with large varchar
-        let large_string = "x".repeat(100_000);
+        // Create a row with large varchar (must fit within u16 offset limit)
+        let large_string = "x".repeat(60_000);
         let row = Row::new(1, vec![Value::varchar(large_string.clone())]);
 
         let (offset, length) = df.append_row(&row).unwrap();
-        assert!(length > 100_000);
+        assert!(length > 60_000);
 
         let read_row = df.read_row(offset, length).unwrap().unwrap();
         if let Value::Varchar(s) = &read_row.values[0] {
-            assert_eq!(s.len(), 100_000);
+            assert_eq!(s.len(), 60_000);
         } else {
             panic!("Expected Varchar");
         }

@@ -1,5 +1,10 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Add u16 overflow guard to row serialization
+
+- Added bounds check in `Row::write_to()` after building the values buffer: returns an error if the values area exceeds 65535 bytes (u16 offset limit)
+- Updated `test_datafile_large_rows` to use a 60KB string instead of 100KB, staying within the u16 limit
+
 ## 2026-03-27 - Add column-offset array to Row serialization
 
 - Changed row binary format: header now includes a u16 offset array between col_count and values

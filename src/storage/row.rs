@@ -33,6 +33,13 @@ impl Row {
             value.write_to(&mut values_buf)?;
         }
 
+        if values_buf.len() > u16::MAX as usize {
+            return Err(Error::Serialization(format!(
+                "Row values area ({} bytes) exceeds u16 offset limit (65535)",
+                values_buf.len()
+            )));
+        }
+
         // Write header
         writer.write_all(&self.row_id.to_le_bytes())?;          // 8 bytes
         writer.write_all(&(col_count as u32).to_le_bytes())?;   // 4 bytes
