@@ -511,23 +511,79 @@ impl DirectDataAccess for Database {
         offset: Option<usize>,
         projection: Option<Vec<usize>>,
     ) -> Result<Vec<Row>> {
-        let rows = self.scan_with_limit(table, filters, limit, offset)?;
+        let cols = match projection {
+            None => return self.scan_with_limit(table, filters, limit, offset),
+            Some(c) => c,
+        };
 
-        if let Some(ref cols) = projection {
-            let mut projected = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut values = Vec::with_capacity(cols.len());
-                for &idx in cols {
-                    if let Some(val) = row.values.get(idx) {
-                        values.push(val.clone());
-                    }
+        let table_engine = self.get_table_mut(table)?;
+        let column_mapping = table_engine.build_column_mapping();
+        let all_stats = table_engine.index_manager().all_stats();
+        let stats_ref = if all_stats.is_empty() { None } else { Some(all_stats) };
+
+        // Try index path
+        let indexed_columns: Vec<String> = table_engine.index_manager().indexed_columns().to_vec();
+        let index_choice = choose_index(&filters, &indexed_columns, stats_ref);
+
+        let source_rows = if filters.is_empty() {
+            // No filters: projected scan
+            table_engine.scan_all_projected(&cols)?
+        } else if let Some((col, ref op)) = index_choice {
+            if let Some(row_ids) = table_engine.index_manager().query_row_ids(&col, op) {
+                let remaining: Vec<Filter> = filters.iter()
+                    .filter(|f| f.column != col || f.operator != *op)
+                    .cloned().collect();
+
+                if remaining.is_empty() {
+                    table_engine.get_by_ids_projected(&row_ids, &cols)?
+                } else {
+                    let rem_col_indices: Vec<Option<usize>> = remaining.iter()
+                        .map(|f| column_mapping.get(&f.column).copied()
+                            .or_else(|| f.column.strip_prefix("col").and_then(|s| s.parse().ok())))
+                        .collect();
+                    // Filter on raw bytes, then project only requested columns
+                    let ctids: Vec<_> = row_ids.iter()
+                        .map(|&id| crate::storage::page::Ctid::from_u64(id)).collect();
+                    table_engine.paged_table_mut().get_rows_by_ctids_filtered(&ctids, |raw_bytes| {
+                        for (filter, col_idx) in remaining.iter().zip(rem_col_indices.iter()) {
+                            if let Some(idx) = col_idx {
+                                match value_at_page_bytes(raw_bytes, *idx) {
+                                    Ok(val) => if !filter.matches(&val) { return false; },
+                                    Err(_) => return false,
+                                }
+                            } else { return false; }
+                        }
+                        true
+                    })?
                 }
-                projected.push(Row::new(row.row_id, values));
+            } else {
+                // Fallback: full scan + filter + project post-hoc
+                let rows = self.scan_with_limit(table, filters, limit, offset)?;
+                return Ok(_project_rows(rows, &cols));
             }
-            Ok(projected)
         } else {
-            Ok(rows)
-        }
+            // No index: filtered scan with projection
+            let mut filters = filters;
+            filters.sort_by_key(|f| f.estimated_cost());
+            let filter_col_indices: Vec<Option<usize>> = filters.iter()
+                .map(|f| column_mapping.get(&f.column).copied()
+                    .or_else(|| f.column.strip_prefix("col").and_then(|s| s.parse().ok())))
+                .collect();
+            let rows = table_engine.scan_all_filtered(|raw_bytes| {
+                for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
+                    if let Some(idx) = col_idx {
+                        match value_at_page_bytes(raw_bytes, *idx) {
+                            Ok(val) => if !filter.matches(&val) { return false; },
+                            Err(_) => return false,
+                        }
+                    } else { return false; }
+                }
+                true
+            })?;
+            return Ok(apply_pagination(_project_rows(rows, &cols), limit, offset));
+        };
+
+        Ok(apply_pagination(source_rows, limit, offset))
     }
 
     fn update(
@@ -664,6 +720,18 @@ impl DirectDataAccess for Database {
 }
 
 /// Apply offset and limit to a pre-filtered result set.
+/// Project rows to keep only selected column indices.
+fn _project_rows(rows: Vec<Row>, cols: &[usize]) -> Vec<Row> {
+    rows.into_iter()
+        .map(|row| {
+            let values = cols.iter()
+                .filter_map(|&i| row.values.get(i).cloned())
+                .collect();
+            Row::new(row.row_id, values)
+        })
+        .collect()
+}
+
 fn apply_pagination(rows: Vec<Row>, limit: Option<usize>, offset: Option<usize>) -> Vec<Row> {
     let offset_val = offset.unwrap_or(0);
     let limit_val = limit.unwrap_or(usize::MAX);

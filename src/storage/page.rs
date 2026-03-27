@@ -10,13 +10,13 @@ use crate::storage::value::Value;
 pub const PAGE_SIZE: usize = 8192;
 
 /// Page header size in bytes.
-const PAGE_HEADER_SIZE: usize = 24;
+pub(crate) const PAGE_HEADER_SIZE: usize = 24;
 
 /// Slot entry size in bytes (offset: u16 + length: u16).
-const SLOT_SIZE: usize = 4;
+pub(crate) const SLOT_SIZE: usize = 4;
 
 /// Sentinel value for empty free-slot list or freed slot offset.
-const INVALID_SLOT: u16 = 0xFFFF;
+pub(crate) const INVALID_SLOT: u16 = 0xFFFF;
 
 /// Page type tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

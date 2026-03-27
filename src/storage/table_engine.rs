@@ -369,6 +369,17 @@ impl TableEngine {
         self.paged_table.scan_all()
     }
 
+    /// Scan all active rows, returning only projected columns.
+    pub fn scan_all_projected(&mut self, columns: &[usize]) -> Result<Vec<Row>> {
+        self.paged_table.scan_all_projected(columns)
+    }
+
+    /// Get multiple rows by ID, returning only projected columns.
+    pub fn get_by_ids_projected(&mut self, row_ids: &[u64], columns: &[usize]) -> Result<Vec<Row>> {
+        let ctids: Vec<Ctid> = row_ids.iter().map(|&id| Ctid::from_u64(id)).collect();
+        self.paged_table.get_rows_by_ctids_projected(&ctids, columns)
+    }
+
     /// Scan active rows with an optional limit for early termination
     pub fn scan_all_limited(&mut self, limit: Option<usize>) -> Result<Vec<Row>> {
         let mut rows = self.paged_table.scan_all()?;
@@ -395,6 +406,11 @@ impl TableEngine {
         F: Fn(&[u8]) -> bool,
     {
         self.paged_table.count_filtered(predicate)
+    }
+
+    /// Get mutable access to the underlying paged table.
+    pub fn paged_table_mut(&mut self) -> &mut PagedTable {
+        &mut self.paged_table
     }
 
     /// Get table statistics

@@ -433,6 +433,16 @@ impl IndexManager {
                     None
                 }
             }
+            Operator::In(values) => {
+                let index = self.indices.get(column)?;
+                let mut all_ids = Vec::new();
+                for val in values {
+                    all_ids.extend(index.search(val));
+                }
+                all_ids.sort_unstable();
+                all_ids.dedup();
+                Some(all_ids)
+            }
             _ => None,
         }
     }

@@ -1,5 +1,27 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Scan performance optimizations (5 changes)
+
+Five targeted optimizations to close the performance gap vs SQLite on scan-heavy operations:
+
+1. **Operator::In index support**: `query_row_ids` now handles `In(values)` by doing N point lookups and unioning results. Also added `In` to `choose_index` indexable set and `estimate_rows` stats.
+2. **Zero-allocation detoast via Cow**: `detoast_row_bytes` returns `Cow<[u8]>` instead of `Vec<u8>`. When no TOAST pointers exist (common case), returns a borrowed reference — zero allocations.
+3. **Zero-copy page reads via mmap pointer**: Scan paths (`scan_all`, `scan_filtered`, `count_filtered`, `get_rows_by_ctids`, `get_rows_by_ctids_filtered`) now read directly from the mmap pointer instead of copying 8KB per page. Per-row `.to_vec()` eliminated for non-toasted rows.
+4. **Column projection**: New `scan_all_projected`, `get_rows_by_ctids_projected` methods deserialize only requested columns using `value_at_page_bytes`. `scan_with_projection` now pushes projection into the storage layer instead of post-hoc filtering.
+5. **Benchmark updated**: Tests that only count results now use `scan_with_projection` with `[0]` (id only), matching SQLite's `SELECT id` queries.
+
+### Results (before → after, ratio vs SQLite):
+| Benchmark | Before | After | Change |
+|-----------|--------|-------|--------|
+| Full scan 10k | 6.88x | ~2.0x | **3.4x faster** |
+| IN (1,3) | 6.44x | ~2.3x | **2.8x faster** |
+| Indexed EQ 2k | 5.25x | ~2.4x | **2.2x faster** |
+| BETWEEN 101 | 3.11x | ~1.3x | **2.4x faster** |
+| LIKE prefix 2k | 1.45x | ~0.6x | **Thunder now wins** |
+| Setup | 1.70x | ~1.2x | improved |
+
+Thunder wins 7 of 11 benchmarks (was 5 of 11).
+
 ## 2026-03-27 - Batch insert optimization
 
 - **PagedTable::insert_batch()**: Hot-page strategy fills pages in memory before flushing

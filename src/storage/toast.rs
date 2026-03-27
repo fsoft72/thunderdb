@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::storage::page::{Page, PageType, PAGE_SIZE};
 use crate::storage::page_file::PageFile;
 use crate::storage::value::Value;
+use std::borrow::Cow;
 
 /// Rows larger than this (in serialized bytes) trigger toasting.
 const TOAST_THRESHOLD: usize = 2000;
@@ -155,7 +156,7 @@ fn decode_toast_pointer(bytes: &[u8]) -> Result<(u32, u16, u32)> {
 ///
 /// Scans each value's type tag. For TOAST_TAG (0x07), reads the overflow
 /// page and substitutes the original data. Returns fully detoasted row bytes.
-pub fn detoast_row_bytes(row_bytes: &[u8], page_file: &mut PageFile) -> Result<Vec<u8>> {
+pub fn detoast_row_bytes<'a>(row_bytes: &'a [u8], page_file: &mut PageFile) -> Result<Cow<'a, [u8]>> {
     if row_bytes.len() < 2 {
         return Err(Error::Serialization("Row too short".to_string()));
     }
@@ -167,7 +168,7 @@ pub fn detoast_row_bytes(row_bytes: &[u8], page_file: &mut PageFile) -> Result<V
     // Check if any TOAST pointers exist (quick scan)
     let has_toast = row_bytes[values_area_start..].iter().any(|&b| b == TOAST_TAG);
     if !has_toast {
-        return Ok(row_bytes.to_vec());
+        return Ok(Cow::Borrowed(row_bytes));
     }
 
     // Walk through values, resolving TOAST pointers
@@ -219,7 +220,7 @@ pub fn detoast_row_bytes(row_bytes: &[u8], page_file: &mut PageFile) -> Result<V
     }
     result.extend_from_slice(&new_values_buf);
 
-    Ok(result)
+    Ok(Cow::Owned(result))
 }
 
 /// Free overflow data referenced by TOAST pointers in a row.

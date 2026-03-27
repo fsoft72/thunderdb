@@ -225,7 +225,8 @@ pub fn choose_index(
             | Operator::GreaterThanOrEqual(_)
             | Operator::LessThan(_)
             | Operator::LessThanOrEqual(_)
-            | Operator::Between(_, _) => true,
+            | Operator::Between(_, _)
+            | Operator::In(_) => true,
             Operator::Like(pattern) => {
                 use crate::index::LikePattern;
                 if let Ok(lp) = LikePattern::parse(pattern) {

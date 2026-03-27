@@ -5,7 +5,7 @@
 //! oversized rows.
 
 use crate::error::Result;
-use crate::storage::page::{Ctid, Page, PageType, PAGE_SIZE, serialize_row_for_page};
+use crate::storage::page::{Ctid, Page, PageType, PAGE_SIZE, PAGE_HEADER_SIZE, SLOT_SIZE, INVALID_SLOT, serialize_row_for_page, value_at_page_bytes};
 use crate::storage::page_file::PageFile;
 use crate::storage::toast;
 use crate::storage::value::Value;
@@ -15,6 +15,9 @@ use std::path::Path;
 
 /// Rows larger than this (serialized bytes) trigger TOAST.
 const TOAST_THRESHOLD: usize = 2000;
+
+/// Type tag for a TOAST pointer (must match toast.rs).
+const TOAST_TAG: u8 = 0x07;
 
 /// Page-based table storage with automatic TOAST support.
 ///
@@ -185,28 +188,70 @@ impl PagedTable {
 
     /// Scan all active rows in the table.
     ///
-    /// Iterates data pages 1..page_count, collecting active rows with
-    /// detoasted values. Row ID is derived from Ctid::to_u64().
+    /// Uses direct mmap access to avoid per-page 8KB copies and per-row
+    /// allocations. Only rows with TOAST pointers incur a copy.
     pub fn scan_all(&mut self) -> Result<Vec<Row>> {
-        let mut rows = Vec::new();
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
         let page_count = self.page_file.page_count();
+        let mut rows = Vec::new();
 
         for page_id in 1..page_count {
-            let page = self.page_file.read_page(page_id)?;
-            if page.page_type() != PageType::Data {
-                continue;
-            }
+            let pd = _mmap_page(mmap_ptr, page_id);
+            if pd[4] != PageType::Data as u8 { continue; }
 
-            for slot in 0..page.slot_count() {
-                let raw = match page.get_row(slot) {
-                    Some(bytes) => bytes.to_vec(),
+            let slot_count = u16::from_le_bytes(pd[6..8].try_into().unwrap());
+            for slot in 0..slot_count {
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
                     None => continue,
                 };
 
-                let detoasted = toast::detoast_row_bytes(&raw, &mut self.page_file)?;
-                let values = _parse_page_row_values(&detoasted)?;
                 let row_id = Ctid::new(page_id, slot).to_u64();
-                rows.push(Row::new(row_id, values));
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    let values = _parse_page_row_values(&detoasted)?;
+                    rows.push(Row::new(row_id, values));
+                } else {
+                    let values = _parse_page_row_values(raw)?;
+                    rows.push(Row::new(row_id, values));
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Scan all active rows, returning only projected columns.
+    ///
+    /// Like `scan_all` but deserializes only the requested column indices,
+    /// skipping expensive VARCHAR parsing for columns not in `columns`.
+    pub fn scan_all_projected(&mut self, columns: &[usize]) -> Result<Vec<Row>> {
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
+        let page_count = self.page_file.page_count();
+        let mut rows = Vec::new();
+
+        for page_id in 1..page_count {
+            let pd = _mmap_page(mmap_ptr, page_id);
+            if pd[4] != PageType::Data as u8 { continue; }
+
+            let slot_count = u16::from_le_bytes(pd[6..8].try_into().unwrap());
+            for slot in 0..slot_count {
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                let row_id = Ctid::new(page_id, slot).to_u64();
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    let values = _parse_projected(&detoasted, columns)?;
+                    rows.push(Row::new(row_id, values));
+                } else {
+                    let values = _parse_projected(raw, columns)?;
+                    rows.push(Row::new(row_id, values));
+                }
             }
         }
 
@@ -221,30 +266,33 @@ impl PagedTable {
     where
         F: Fn(&[u8]) -> bool,
     {
-        let mut rows = Vec::new();
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
         let page_count = self.page_file.page_count();
+        let mut rows = Vec::new();
 
         for page_id in 1..page_count {
-            let page = self.page_file.read_page(page_id)?;
-            if page.page_type() != PageType::Data {
-                continue;
-            }
+            let pd = _mmap_page(mmap_ptr, page_id);
+            if pd[4] != PageType::Data as u8 { continue; }
 
-            for slot in 0..page.slot_count() {
-                let raw = match page.get_row(slot) {
-                    Some(bytes) => bytes,
+            let slot_count = u16::from_le_bytes(pd[6..8].try_into().unwrap());
+            for slot in 0..slot_count {
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
                     None => continue,
                 };
 
-                if !predicate(raw) {
-                    continue;
-                }
+                if !predicate(raw) { continue; }
 
-                let raw_owned = raw.to_vec();
-                let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
-                let values = _parse_page_row_values(&detoasted)?;
                 let row_id = Ctid::new(page_id, slot).to_u64();
-                rows.push(Row::new(row_id, values));
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    let values = _parse_page_row_values(&detoasted)?;
+                    rows.push(Row::new(row_id, values));
+                } else {
+                    let values = _parse_page_row_values(raw)?;
+                    rows.push(Row::new(row_id, values));
+                }
             }
         }
 
@@ -256,18 +304,18 @@ impl PagedTable {
     where
         F: Fn(&[u8]) -> bool,
     {
-        let mut count = 0;
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
         let page_count = self.page_file.page_count();
+        let mut count = 0;
 
         for page_id in 1..page_count {
-            let page = self.page_file.read_page(page_id)?;
-            if page.page_type() != PageType::Data {
-                continue;
-            }
+            let pd = _mmap_page(mmap_ptr, page_id);
+            if pd[4] != PageType::Data as u8 { continue; }
 
-            for slot in 0..page.slot_count() {
-                let raw = match page.get_row(slot) {
-                    Some(bytes) => bytes,
+            let slot_count = u16::from_le_bytes(pd[6..8].try_into().unwrap());
+            for slot in 0..slot_count {
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
                     None => continue,
                 };
 
@@ -282,35 +330,77 @@ impl PagedTable {
 
     /// Fetch multiple rows by ctid, grouping reads by page_id.
     ///
-    /// Reads each page at most once, extracting all requested slots
-    /// from that page before moving on. Results are returned in
-    /// arbitrary order.
+    /// Uses direct mmap access to avoid per-page 8KB copies.
+    /// Results are returned in arbitrary order.
     pub fn get_rows_by_ctids(&mut self, ctids: &[Ctid]) -> Result<Vec<Row>> {
         let mut by_page: HashMap<u32, Vec<u16>> = HashMap::new();
         for ctid in ctids {
             by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
         }
 
-        let mut rows = Vec::with_capacity(ctids.len());
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
         let page_count = self.page_file.page_count();
+        let mut rows = Vec::with_capacity(ctids.len());
 
         for (page_id, slots) in &by_page {
-            if *page_id >= page_count {
-                continue;
-            }
+            if *page_id >= page_count { continue; }
 
-            let page = self.page_file.read_page(*page_id)?;
+            let pd = _mmap_page(mmap_ptr, *page_id);
 
             for &slot in slots {
-                let raw = match page.get_row(slot) {
-                    Some(bytes) => bytes.to_vec(),
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
                     None => continue,
                 };
 
-                let detoasted = toast::detoast_row_bytes(&raw, &mut self.page_file)?;
-                let values = _parse_page_row_values(&detoasted)?;
                 let row_id = Ctid::new(*page_id, slot).to_u64();
-                rows.push(Row::new(row_id, values));
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    let values = _parse_page_row_values(&detoasted)?;
+                    rows.push(Row::new(row_id, values));
+                } else {
+                    let values = _parse_page_row_values(raw)?;
+                    rows.push(Row::new(row_id, values));
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Fetch multiple rows by ctid, returning only projected columns.
+    pub fn get_rows_by_ctids_projected(&mut self, ctids: &[Ctid], columns: &[usize]) -> Result<Vec<Row>> {
+        let mut by_page: HashMap<u32, Vec<u16>> = HashMap::new();
+        for ctid in ctids {
+            by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
+        }
+
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
+        let page_count = self.page_file.page_count();
+        let mut rows = Vec::with_capacity(ctids.len());
+
+        for (page_id, slots) in &by_page {
+            if *page_id >= page_count { continue; }
+
+            let pd = _mmap_page(mmap_ptr, *page_id);
+
+            for &slot in slots {
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                let row_id = Ctid::new(*page_id, slot).to_u64();
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    let values = _parse_projected(&detoasted, columns)?;
+                    rows.push(Row::new(row_id, values));
+                } else {
+                    let values = _parse_projected(raw, columns)?;
+                    rows.push(Row::new(row_id, values));
+                }
             }
         }
 
@@ -334,31 +424,33 @@ impl PagedTable {
             by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
         }
 
-        let mut rows = Vec::with_capacity(ctids.len());
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
         let page_count = self.page_file.page_count();
+        let mut rows = Vec::with_capacity(ctids.len());
 
         for (page_id, slots) in &by_page {
-            if *page_id >= page_count {
-                continue;
-            }
+            if *page_id >= page_count { continue; }
 
-            let page = self.page_file.read_page(*page_id)?;
+            let pd = _mmap_page(mmap_ptr, *page_id);
 
             for &slot in slots {
-                let raw = match page.get_row(slot) {
-                    Some(bytes) => bytes,
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
                     None => continue,
                 };
 
-                if !predicate(raw) {
-                    continue;
-                }
+                if !predicate(raw) { continue; }
 
-                let raw_owned = raw.to_vec();
-                let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
-                let values = _parse_page_row_values(&detoasted)?;
                 let row_id = Ctid::new(*page_id, slot).to_u64();
-                rows.push(Row::new(row_id, values));
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    let values = _parse_page_row_values(&detoasted)?;
+                    rows.push(Row::new(row_id, values));
+                } else {
+                    let values = _parse_page_row_values(raw)?;
+                    rows.push(Row::new(row_id, values));
+                }
             }
         }
 
@@ -369,6 +461,65 @@ impl PagedTable {
     pub fn active_row_count(&self) -> usize {
         self.active_count as usize
     }
+}
+
+/// Get a page-sized slice from the mmap pointer.
+///
+/// # Safety
+/// Internally uses `unsafe` to create a slice from the raw pointer.
+/// The caller must ensure `mmap_ptr` is valid for at least
+/// `(page_id + 1) * PAGE_SIZE` bytes and that no concurrent writes
+/// invalidate the mapping (i.e., `ensure_mmap_and_ptr` was called
+/// and no writes have occurred since).
+#[inline]
+fn _mmap_page<'a>(mmap_ptr: *const u8, page_id: u32) -> &'a [u8] {
+    let offset = page_id as usize * PAGE_SIZE;
+    // SAFETY: mmap_ptr was obtained from ensure_mmap_and_ptr() which
+    // remaps if stale. No writes occur during scan, so the mapping
+    // remains valid for the duration of the scan loop.
+    unsafe { std::slice::from_raw_parts(mmap_ptr.add(offset), PAGE_SIZE) }
+}
+
+/// Extract the raw row bytes for a slot from a page data slice.
+///
+/// Returns `None` if the slot is out of bounds or has been freed.
+#[inline]
+fn _slot_bytes<'a>(page_data: &'a [u8], slot: u16) -> Option<&'a [u8]> {
+    // Check against slot_count (bytes 6..8 in page header)
+    let slot_count = u16::from_le_bytes(page_data[6..8].try_into().unwrap());
+    if slot >= slot_count { return None; }
+
+    let slot_pos = PAGE_HEADER_SIZE + slot as usize * SLOT_SIZE;
+    if slot_pos + SLOT_SIZE > page_data.len() { return None; }
+
+    let offset = u16::from_le_bytes(page_data[slot_pos..slot_pos + 2].try_into().unwrap());
+    if offset == INVALID_SLOT { return None; }
+
+    let length = u16::from_le_bytes(page_data[slot_pos + 2..slot_pos + 4].try_into().unwrap());
+    let start = offset as usize;
+    let end = start + length as usize;
+    Some(&page_data[start..end])
+}
+
+/// Quick inline check for TOAST pointers in raw row bytes.
+#[inline]
+fn _has_toast(raw: &[u8]) -> bool {
+    if raw.len() < 2 { return false; }
+    let col_count = u16::from_le_bytes(raw[0..2].try_into().unwrap()) as usize;
+    let values_area = 2 + col_count * 2;
+    values_area < raw.len() && raw[values_area..].contains(&TOAST_TAG)
+}
+
+/// Parse only selected columns from page-row bytes.
+///
+/// Uses `value_at_page_bytes` to jump directly to each requested column
+/// offset, skipping deserialization of unused columns.
+fn _parse_projected(bytes: &[u8], columns: &[usize]) -> Result<Vec<Value>> {
+    let mut values = Vec::with_capacity(columns.len());
+    for &col in columns {
+        values.push(value_at_page_bytes(bytes, col)?);
+    }
+    Ok(values)
 }
 
 /// Parse values from detoasted page-row bytes (u16 col_count format).

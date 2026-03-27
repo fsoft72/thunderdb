@@ -178,7 +178,12 @@ impl IndexStatistics {
                 // Rough estimate for prefix-based LIKE
                 self.total_entries / self.cardinality.max(1)
             }
-            // NotEquals, In, NotIn, IsNull, IsNotNull, NotLike — worst case
+            Operator::In(values) => {
+                // N distinct lookups × average duplicates per key
+                let per_key = self.total_entries / self.cardinality.max(1);
+                values.len() * per_key
+            }
+            // NotEquals, NotIn, IsNull, IsNotNull, NotLike — worst case
             _ => self.total_entries,
         }
     }

@@ -329,9 +329,11 @@ fn thunderdb_vs_sqlite_benchmark() {
     {
         let (td, tcount) = timed(|| {
             let rows = tdb
-                .scan(
+                .scan_with_projection(
                     "blog_posts",
                     vec![Filter::new("title", Operator::Like("Post about rust%".into()))],
+                    None, None,
+                    Some(vec![0]),
                 )
                 .unwrap();
             rows.len()
@@ -357,9 +359,11 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 3. LIKE prefix single hit on content ────────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan(
+            tdb.scan_with_projection(
                 "blog_posts",
                 vec![Filter::new("content", Operator::Like("This is post 42 %".into()))],
+                None, None,
+                Some(vec![0]),
             )
             .unwrap()
             .len()
@@ -382,9 +386,11 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 4. Indexed equality: posts by author_id ─────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan(
+            tdb.scan_with_projection(
                 "blog_posts",
                 vec![Filter::new("author_id", Operator::Equals(Value::Int32(1)))],
+                None, None,
+                Some(vec![0]),
             )
             .unwrap()
             .len()
@@ -571,12 +577,14 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 8. IN operator: posts by authors (1, 3) ─────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan(
+            tdb.scan_with_projection(
                 "blog_posts",
                 vec![Filter::new(
                     "author_id",
                     Operator::In(vec![Value::Int32(1), Value::Int32(3)]),
                 )],
+                None, None,
+                Some(vec![0]),
             )
             .unwrap()
             .len()
@@ -598,12 +606,14 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 9. Range scan: BETWEEN on id ────────────────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan(
+            tdb.scan_with_projection(
                 "blog_posts",
                 vec![Filter::new(
                     "id",
                     Operator::Between(Value::Int32(5000), Value::Int32(5100)),
                 )],
+                None, None,
+                Some(vec![0]),
             )
             .unwrap()
             .len()
@@ -624,7 +634,8 @@ fn thunderdb_vs_sqlite_benchmark() {
     // ── 10. Full table scan (all posts) ─────────────────────────────────
     {
         let (td, tcount) = timed(|| {
-            tdb.scan("blog_posts", vec![]).unwrap().len()
+            tdb.scan_with_projection("blog_posts", vec![], None, None, Some(vec![0]))
+                .unwrap().len()
         });
 
         let (sd, scount) = timed(|| {

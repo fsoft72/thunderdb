@@ -96,6 +96,18 @@ impl PageFile {
         Ok(())
     }
 
+    /// Ensure mmap is fresh and return a raw pointer to the mmap start.
+    ///
+    /// The pointer remains valid as long as no writes occur (`stale_mmap`
+    /// stays false). Call once before a read-only scan loop.
+    pub fn ensure_mmap_and_ptr(&mut self) -> Result<*const u8> {
+        self.remap_if_needed()?;
+        match self.mmap.as_ref() {
+            Some(m) => Ok(m.as_ptr()),
+            None => Err(Error::Storage("No mmap available".into())),
+        }
+    }
+
     /// Read a page by ID.
     ///
     /// Uses mmap when available for zero-copy access.
