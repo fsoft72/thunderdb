@@ -107,6 +107,29 @@ impl PageHeader {
     }
 }
 
+/// Serialize row values for page storage (no row_id, u16 col_count).
+///
+/// Format: [col_count: u16][off0: u16]...[offN-1: u16][val0]...[valN-1]
+pub fn serialize_row_for_page(values: &[Value]) -> Vec<u8> {
+    let col_count = values.len();
+    let mut values_buf = Vec::with_capacity(col_count * 8);
+    let mut offsets: Vec<u16> = Vec::with_capacity(col_count);
+
+    for value in values {
+        offsets.push(values_buf.len() as u16);
+        value.write_to(&mut values_buf).unwrap();
+    }
+
+    let total = 2 + col_count * 2 + values_buf.len();
+    let mut row = Vec::with_capacity(total);
+    row.extend_from_slice(&(col_count as u16).to_le_bytes());
+    for off in &offsets {
+        row.extend_from_slice(&off.to_le_bytes());
+    }
+    row.extend_from_slice(&values_buf);
+    row
+}
+
 /// An 8KB slotted page.
 ///
 /// Slot directory grows forward from byte 24; row data grows backward
@@ -180,6 +203,70 @@ impl Page {
             self.free_space() >= row_size + SLOT_SIZE
         }
     }
+
+    /// Insert a row into the page. Returns the slot index.
+    pub fn insert_row(&mut self, row_data: &[u8]) -> Result<u16> {
+        let row_len = row_data.len();
+        if !self.can_fit(row_len) {
+            return Err(Error::Storage(format!(
+                "Page {} is full: need {} bytes, have {} free",
+                self.header.page_id, row_len, self.free_space()
+            )));
+        }
+
+        // Allocate row space (grows backward)
+        let new_end = self.header.free_space_end as usize - row_len;
+        self.data[new_end..new_end + row_len].copy_from_slice(row_data);
+        self.header.free_space_end = new_end as u16;
+
+        // Allocate slot
+        let slot_index = if self.header.first_free_slot != INVALID_SLOT {
+            let slot = self.header.first_free_slot;
+            let slot_pos = PAGE_HEADER_SIZE + slot as usize * SLOT_SIZE;
+            let next_free = u16::from_le_bytes(
+                self.data[slot_pos + 2..slot_pos + 4].try_into().unwrap(),
+            );
+            self.header.first_free_slot = next_free;
+            slot
+        } else {
+            let slot = self.header.slot_count;
+            self.header.slot_count += 1;
+            self.header.free_space_start += SLOT_SIZE as u16;
+            slot
+        };
+
+        // Write slot entry
+        let slot_pos = PAGE_HEADER_SIZE + slot_index as usize * SLOT_SIZE;
+        self.data[slot_pos..slot_pos + 2].copy_from_slice(&(new_end as u16).to_le_bytes());
+        self.data[slot_pos + 2..slot_pos + 4].copy_from_slice(&(row_len as u16).to_le_bytes());
+
+        self.header.active_count += 1;
+        Ok(slot_index)
+    }
+
+    /// Get the raw row data for a slot. Returns None if the slot is free or out of bounds.
+    pub fn get_row(&self, slot_index: u16) -> Option<&[u8]> {
+        if slot_index >= self.header.slot_count {
+            return None;
+        }
+
+        let slot_pos = PAGE_HEADER_SIZE + slot_index as usize * SLOT_SIZE;
+        let offset = u16::from_le_bytes(
+            self.data[slot_pos..slot_pos + 2].try_into().unwrap(),
+        );
+
+        if offset == INVALID_SLOT {
+            return None;
+        }
+
+        let length = u16::from_le_bytes(
+            self.data[slot_pos + 2..slot_pos + 4].try_into().unwrap(),
+        );
+
+        let start = offset as usize;
+        let end = start + length as usize;
+        Some(&self.data[start..end])
+    }
 }
 
 #[cfg(test)]
@@ -236,5 +323,61 @@ mod tests {
         assert_eq!(restored.page_type(), PageType::Data);
         assert_eq!(restored.slot_count(), 0);
         assert_eq!(restored.active_count(), 0);
+    }
+
+    #[test]
+    fn test_serialize_row_for_page() {
+        let values = vec![Value::Int32(42), Value::varchar("hello".to_string())];
+        let data = serialize_row_for_page(&values);
+        let col_count = u16::from_le_bytes(data[0..2].try_into().unwrap());
+        assert_eq!(col_count, 2);
+    }
+
+    #[test]
+    fn test_insert_and_get_row() {
+        let mut page = Page::new(0);
+        let values = vec![Value::Int32(42), Value::varchar("hello".to_string())];
+        let row_data = serialize_row_for_page(&values);
+
+        let slot = page.insert_row(&row_data).unwrap();
+        assert_eq!(slot, 0);
+        assert_eq!(page.active_count(), 1);
+        assert_eq!(page.slot_count(), 1);
+
+        let retrieved = page.get_row(slot).unwrap();
+        assert_eq!(retrieved, &row_data[..]);
+    }
+
+    #[test]
+    fn test_insert_multiple_rows() {
+        let mut page = Page::new(0);
+        for i in 0..50 {
+            let values = vec![Value::Int32(i), Value::varchar(format!("row_{}", i))];
+            let data = serialize_row_for_page(&values);
+            page.insert_row(&data).unwrap();
+        }
+        assert_eq!(page.active_count(), 50);
+        assert_eq!(page.slot_count(), 50);
+    }
+
+    #[test]
+    fn test_insert_full_page_error() {
+        let mut page = Page::new(0);
+        let big_value = Value::varchar("x".repeat(200));
+        let data = serialize_row_for_page(&vec![big_value]);
+        let mut count = 0;
+        while page.can_fit(data.len()) {
+            page.insert_row(&data).unwrap();
+            count += 1;
+        }
+        assert!(count > 0);
+        assert!(page.insert_row(&data).is_err());
+    }
+
+    #[test]
+    fn test_get_invalid_slot() {
+        let page = Page::new(0);
+        assert!(page.get_row(0).is_none());
+        assert!(page.get_row(100).is_none());
     }
 }
