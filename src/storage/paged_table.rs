@@ -91,6 +91,142 @@ impl PagedTable {
         Ok(Some(Row::new(ctid.to_u64(), values)))
     }
 
+    /// Delete a row by ctid.
+    ///
+    /// Reads the page, frees any TOAST data, marks the slot as deleted,
+    /// writes the page back, and updates the FSM.
+    /// Returns `false` if the slot was already free or out of bounds.
+    pub fn delete_row(&mut self, ctid: Ctid) -> Result<bool> {
+        if ctid.page_id >= self.page_file.page_count() {
+            return Ok(false);
+        }
+
+        let mut page = self.page_file.read_page(ctid.page_id)?;
+
+        let raw = match page.get_row(ctid.slot_index) {
+            Some(bytes) => bytes.to_vec(),
+            None => return Ok(false),
+        };
+
+        // Free any overflow data referenced by TOAST pointers
+        toast::free_toast_data(&raw, &mut self.page_file)?;
+
+        if !page.delete_row(ctid.slot_index) {
+            return Ok(false);
+        }
+
+        self.page_file.write_page(&page)?;
+        self.page_file.update_fsm(ctid.page_id, page.free_space())?;
+        self.active_count -= 1;
+
+        Ok(true)
+    }
+
+    /// Update a row by deleting the old one and inserting new values.
+    ///
+    /// Returns the ctid of the newly inserted row.
+    pub fn update_row(&mut self, ctid: Ctid, values: &[Value]) -> Result<Ctid> {
+        self.delete_row(ctid)?;
+        self.insert_row(values)
+    }
+
+    /// Scan all active rows in the table.
+    ///
+    /// Iterates data pages 1..page_count, collecting active rows with
+    /// detoasted values. Row ID is derived from Ctid::to_u64().
+    pub fn scan_all(&mut self) -> Result<Vec<Row>> {
+        let mut rows = Vec::new();
+        let page_count = self.page_file.page_count();
+
+        for page_id in 1..page_count {
+            let page = self.page_file.read_page(page_id)?;
+            if page.page_type() != PageType::Data {
+                continue;
+            }
+
+            for slot in 0..page.slot_count() {
+                let raw = match page.get_row(slot) {
+                    Some(bytes) => bytes.to_vec(),
+                    None => continue,
+                };
+
+                let detoasted = toast::detoast_row_bytes(&raw, &mut self.page_file)?;
+                let values = _parse_page_row_values(&detoasted)?;
+                let row_id = Ctid::new(page_id, slot).to_u64();
+                rows.push(Row::new(row_id, values));
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Scan rows that pass a raw-bytes predicate.
+    ///
+    /// The predicate receives the raw (possibly toasted) slot bytes.
+    /// Only matching rows are detoasted and deserialized.
+    pub fn scan_filtered<F>(&mut self, predicate: F) -> Result<Vec<Row>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let mut rows = Vec::new();
+        let page_count = self.page_file.page_count();
+
+        for page_id in 1..page_count {
+            let page = self.page_file.read_page(page_id)?;
+            if page.page_type() != PageType::Data {
+                continue;
+            }
+
+            for slot in 0..page.slot_count() {
+                let raw = match page.get_row(slot) {
+                    Some(bytes) => bytes,
+                    None => continue,
+                };
+
+                if !predicate(raw) {
+                    continue;
+                }
+
+                let raw_owned = raw.to_vec();
+                let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                let values = _parse_page_row_values(&detoasted)?;
+                let row_id = Ctid::new(page_id, slot).to_u64();
+                rows.push(Row::new(row_id, values));
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Count rows that pass a raw-bytes predicate without collecting them.
+    pub fn count_filtered<F>(&mut self, predicate: F) -> Result<usize>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let mut count = 0;
+        let page_count = self.page_file.page_count();
+
+        for page_id in 1..page_count {
+            let page = self.page_file.read_page(page_id)?;
+            if page.page_type() != PageType::Data {
+                continue;
+            }
+
+            for slot in 0..page.slot_count() {
+                let raw = match page.get_row(slot) {
+                    Some(bytes) => bytes,
+                    None => continue,
+                };
+
+                if predicate(raw) {
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Return the number of active (non-deleted) rows.
     pub fn active_row_count(&self) -> usize {
         self.active_count as usize
@@ -210,6 +346,142 @@ mod tests {
         pt.insert_row(&[Value::Int32(1)]).unwrap();
         let result = pt.get_row(Ctid::new(1, 99)).unwrap();
         assert!(result.is_none());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_delete_then_get_none() {
+        let path = temp_path("test_delete.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        let ctid = pt.insert_row(&[Value::Int32(1)]).unwrap();
+        assert_eq!(pt.active_row_count(), 1);
+
+        let deleted = pt.delete_row(ctid).unwrap();
+        assert!(deleted);
+        assert_eq!(pt.active_row_count(), 0);
+
+        let row = pt.get_row(ctid).unwrap();
+        assert!(row.is_none());
+
+        // Double delete returns false
+        let deleted_again = pt.delete_row(ctid).unwrap();
+        assert!(!deleted_again);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_update_row() {
+        let path = temp_path("test_update.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        // Insert two rows so slot reuse does not overwrite the one we check
+        pt.insert_row(&[Value::Int32(0)]).unwrap();
+        let old_ctid = pt.insert_row(&[Value::Int32(1), Value::varchar("old".to_string())]).unwrap();
+
+        let new_ctid = pt.update_row(old_ctid, &[Value::Int32(2), Value::varchar("new".to_string())]).unwrap();
+
+        // New ctid has the updated data
+        let row = pt.get_row(new_ctid).unwrap().expect("updated row should exist");
+        assert_eq!(row.values[0], Value::Int32(2));
+        assert_eq!(row.values[1], Value::varchar("new".to_string()));
+
+        // Active count: started with 2, update deletes 1 + inserts 1 = still 2
+        assert_eq!(pt.active_row_count(), 2);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_scan_all() {
+        let path = temp_path("test_scan_all.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        for i in 0..10 {
+            pt.insert_row(&[Value::Int32(i)]).unwrap();
+        }
+
+        let rows = pt.scan_all().unwrap();
+        assert_eq!(rows.len(), 10);
+
+        // Verify all values present (order may vary by page layout)
+        let mut found: Vec<i32> = rows.iter().map(|r| {
+            if let Value::Int32(v) = r.values[0] { v } else { panic!("expected Int32") }
+        }).collect();
+        found.sort();
+        assert_eq!(found, (0..10).collect::<Vec<_>>());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_scan_all_after_delete() {
+        let path = temp_path("test_scan_del.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        let mut ctids = Vec::new();
+        for i in 0..5 {
+            ctids.push(pt.insert_row(&[Value::Int32(i)]).unwrap());
+        }
+
+        // Delete row 1 and 3
+        pt.delete_row(ctids[1]).unwrap();
+        pt.delete_row(ctids[3]).unwrap();
+
+        let rows = pt.scan_all().unwrap();
+        assert_eq!(rows.len(), 3);
+
+        let mut found: Vec<i32> = rows.iter().map(|r| {
+            if let Value::Int32(v) = r.values[0] { v } else { panic!("expected Int32") }
+        }).collect();
+        found.sort();
+        assert_eq!(found, vec![0, 2, 4]);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_scan_filtered() {
+        let path = temp_path("test_scan_filter.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        for i in 0..10 {
+            pt.insert_row(&[Value::Int32(i)]).unwrap();
+        }
+
+        // Filter: accept all rows (always true)
+        let all = pt.scan_filtered(|_bytes| true).unwrap();
+        assert_eq!(all.len(), 10);
+
+        // Filter: reject all rows
+        let none = pt.scan_filtered(|_bytes| false).unwrap();
+        assert_eq!(none.len(), 0);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_count_filtered() {
+        let path = temp_path("test_count_filter.pages");
+        cleanup(&path);
+
+        let mut pt = PagedTable::open(&path).unwrap();
+        for i in 0..10 {
+            pt.insert_row(&[Value::Int32(i)]).unwrap();
+        }
+
+        let count_all = pt.count_filtered(|_bytes| true).unwrap();
+        assert_eq!(count_all, 10);
+
+        let count_none = pt.count_filtered(|_bytes| false).unwrap();
+        assert_eq!(count_none, 0);
 
         cleanup(&path);
     }
