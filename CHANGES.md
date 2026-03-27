@@ -1,48 +1,12 @@
 # ThunderDB Changes
 
-## 2026-03-27 - Wire callback-based filtered scan into Database::scan_with_limit
+## 2026-03-27 - Text matching performance optimizations
 
-- Changed no-index scan path: queries with filters now use `scan_all_filtered()` with a closure
-- The closure uses `Row::value_at()` to extract only filter columns from raw bytes, avoiding full deserialization of non-matching rows
-- Added `apply_pagination()` helper for offset/limit on pre-filtered results
-- Includes `colN` fallback for column index resolution (matching `apply_filters` behavior)
-- All existing tests pass unchanged
-
-## 2026-03-27 - Add u16 overflow guard to row serialization
-
-- Added bounds check in `Row::write_to()` after building the values buffer: returns an error if the values area exceeds 65535 bytes (u16 offset limit)
-- Updated `test_datafile_large_rows` to use a 60KB string instead of 100KB, staying within the u16 limit
-
-## 2026-03-27 - Add column-offset array to Row serialization
-
-- Changed row binary format: header now includes a u16 offset array between col_count and values
-- Format: `[row_id:8][col_count:4][off0:2]...[offN-1:2][val0]...[valN-1]`
-- Added `Row::value_at(bytes, col_idx)` for O(1) column access without full deserialization
-- Updated `write_to()`, `to_bytes()`, and `from_bytes()` for the new format
-- Added tests: `test_row_format_with_offsets`, `test_value_at_single_column`
-- All existing tests pass unchanged (round-trip format is consistent)
-
-## 2026-03-27 - Fix LikePattern: safe Finder construction and Eq impl
-
-- Replaced `unsafe` block in `LikePattern::new_contains` with `Finder::into_owned()` for safe, owned SIMD finder
-- Added `Eq` impl for `LikePattern` (was missing alongside `PartialEq`)
-
-## 2026-03-27 - Use memchr SIMD for LIKE Contains matching
-
-- Added `memchr = "2"` as a direct dependency in `Cargo.toml`
-- Changed `LikePattern::Contains(String)` to a struct variant with a pre-built `memchr::memmem::Finder`
-- SIMD-accelerated substring search replaces `str::contains()` for `%pattern%` LIKE queries
-- Switched `Exact`, `Prefix`, `Suffix` matching to byte-level comparisons (`as_bytes()`)
-- Added manual `PartialEq` and `Clone` impls (Finder is not Clone/PartialEq)
-- All existing tests pass unchanged
-
-## 2026-03-27 - ThunderDB vs SQLite3 comparison benchmark
-
-- New integration test: `tests/integration/thunderdb_vs_sqlite_bench.rs`
-- Runs the same 11 operations on both ThunderDB and SQLite3 (via rusqlite bundled)
-- Operations: setup, COUNT(*), LIKE prefix, indexed equality, post+comments join, 3-table join, recent posts page, IN operator, BETWEEN range, full scan, COUNT WHERE
-- Prints a side-by-side timing table with ratio and winner indicator
-- Added `rusqlite` (bundled) as dev-dependency
+- **memchr SIMD LIKE matching**: `LikePattern` now uses `memchr::memmem::Finder` for `Contains` patterns with pre-built SIMD lookup tables; `Prefix`/`Suffix` use byte-slice comparison
+- **Column-offset row format**: Row serialization includes a u16 offset array per row, enabling O(1) single-column access via `Row::value_at()` without deserializing the entire row
+- **Callback-based filtered scan**: `DataFile::scan_rows_callback()` and `TableEngine::scan_all_filtered()` apply filters on raw bytes before full deserialization, avoiding unnecessary `Value`/`SmallString` construction for non-matching rows
+- **Prefix LIKE via B-tree index**: Benchmark now creates indexes on `title` column, exercising the existing `prefix_search_by_index` path for `LIKE 'prefix%'` queries
+- Added `memchr` as direct dependency
 
 ## 2026-03-26 - SQL JOIN support
 
