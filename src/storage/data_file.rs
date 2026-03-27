@@ -560,6 +560,83 @@ impl DataFile {
         Ok(results)
     }
 
+    /// Count active rows matching a predicate without deserializing.
+    ///
+    /// Like `scan_rows_callback` but only counts matches instead of
+    /// collecting deserialized rows. Zero allocations for row data.
+    pub fn count_rows_callback<F>(&mut self, predicate: F) -> Result<usize>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let mut count = 0usize;
+        let mut row_buffer = Vec::with_capacity(1024);
+
+        match &mut self.backend {
+            DataFileBackend::File(writer) => {
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
+                let file = writer.get_mut();
+                file.seek(SeekFrom::Start(0))?;
+
+                let mut reader = BufReader::with_capacity(256 * 1024, &*file);
+                loop {
+                    let mut marker = [0u8; 1];
+                    match reader.read_exact(&mut marker) {
+                        Ok(_) => {}
+                        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => return Err(e.into()),
+                    }
+
+                    let mut length_buf = [0u8; 4];
+                    reader.read_exact(&mut length_buf)?;
+                    let length = u32::from_le_bytes(length_buf) as usize;
+
+                    if marker[0] == TOMBSTONE_MARKER {
+                        std::io::copy(
+                            &mut reader.by_ref().take(length as u64),
+                            &mut std::io::sink(),
+                        )?;
+                    } else {
+                        if row_buffer.len() < length {
+                            row_buffer.resize(length, 0);
+                        }
+                        reader.read_exact(&mut row_buffer[..length])?;
+                        if predicate(&row_buffer[..length]) {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            DataFileBackend::Memory(data) => {
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    if cursor + 1 + 4 > data.len() {
+                        break;
+                    }
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let length = u32::from_le_bytes(
+                        data[cursor..cursor + 4].try_into().unwrap(),
+                    ) as usize;
+                    cursor += 4;
+
+                    if cursor + length > data.len() {
+                        break;
+                    }
+                    if marker != TOMBSTONE_MARKER && predicate(&data[cursor..cursor + length]) {
+                        count += 1;
+                    }
+                    cursor += length;
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Scan all rows in the file (for recovery/rebuild)
     ///
     /// Returns vector of (offset, length, row_id, deleted) tuples

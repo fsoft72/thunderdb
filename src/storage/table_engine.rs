@@ -465,6 +465,14 @@ impl TableEngine {
         self.data_file.scan_rows_callback(None, predicate)
     }
 
+    /// Count active rows matching a predicate without deserializing.
+    pub fn count_filtered<F>(&mut self, predicate: F) -> Result<usize>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        self.data_file.count_rows_callback(predicate)
+    }
+
     /// Get table statistics
     pub fn stats(&self) -> TableStats {
         TableStats {
