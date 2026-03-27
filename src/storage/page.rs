@@ -267,6 +267,31 @@ impl Page {
         let end = start + length as usize;
         Some(&self.data[start..end])
     }
+
+    /// Delete a row by slot index. Returns false if the slot is already
+    /// free or out of bounds.
+    pub fn delete_row(&mut self, slot_index: u16) -> bool {
+        if slot_index >= self.header.slot_count {
+            return false;
+        }
+
+        let slot_pos = PAGE_HEADER_SIZE + slot_index as usize * SLOT_SIZE;
+        let offset = u16::from_le_bytes(
+            self.data[slot_pos..slot_pos + 2].try_into().unwrap(),
+        );
+
+        if offset == INVALID_SLOT {
+            return false;
+        }
+
+        self.data[slot_pos..slot_pos + 2].copy_from_slice(&INVALID_SLOT.to_le_bytes());
+        self.data[slot_pos + 2..slot_pos + 4]
+            .copy_from_slice(&self.header.first_free_slot.to_le_bytes());
+        self.header.first_free_slot = slot_index;
+        self.header.active_count -= 1;
+
+        true
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +404,49 @@ mod tests {
         let page = Page::new(0);
         assert!(page.get_row(0).is_none());
         assert!(page.get_row(100).is_none());
+    }
+
+    #[test]
+    fn test_delete_row() {
+        let mut page = Page::new(0);
+        let data = serialize_row_for_page(&vec![Value::Int32(1)]);
+        let slot = page.insert_row(&data).unwrap();
+        assert_eq!(page.active_count(), 1);
+
+        assert!(page.delete_row(slot));
+        assert_eq!(page.active_count(), 0);
+        assert!(page.get_row(slot).is_none());
+        assert!(!page.delete_row(slot)); // double delete
+    }
+
+    #[test]
+    fn test_slot_reuse_after_delete() {
+        let mut page = Page::new(0);
+        let data1 = serialize_row_for_page(&vec![Value::Int32(1)]);
+        let data2 = serialize_row_for_page(&vec![Value::Int32(2)]);
+        let data3 = serialize_row_for_page(&vec![Value::Int32(3)]);
+
+        let s0 = page.insert_row(&data1).unwrap();
+        let s1 = page.insert_row(&data2).unwrap();
+        let _s2 = page.insert_row(&data3).unwrap();
+
+        page.delete_row(s0);
+        page.delete_row(s1);
+
+        // LIFO: next insert reuses s1, then s0
+        let data4 = serialize_row_for_page(&vec![Value::Int32(4)]);
+        let s_new = page.insert_row(&data4).unwrap();
+        assert_eq!(s_new, s1);
+
+        let data5 = serialize_row_for_page(&vec![Value::Int32(5)]);
+        let s_new2 = page.insert_row(&data5).unwrap();
+        assert_eq!(s_new2, s0);
+    }
+
+    #[test]
+    fn test_delete_invalid_slot() {
+        let mut page = Page::new(0);
+        assert!(!page.delete_row(0));
+        assert!(!page.delete_row(999));
     }
 }
