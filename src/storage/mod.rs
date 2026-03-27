@@ -16,6 +16,7 @@ pub mod small_string;
 pub mod page;
 pub mod page_file;
 pub mod toast;
+pub mod paged_table;
 
 pub use value::Value;
 pub use row::Row;
@@ -24,3 +25,4 @@ pub use data_file::DataFile;
 pub use table_engine::TableEngine;
 pub use small_string::SmallString;
 pub use page_file::PageFile;
+pub use paged_table::PagedTable;
