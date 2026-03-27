@@ -1,5 +1,13 @@
 # ThunderDB Changes
 
+## 2026-03-27 - TOAST overflow (sub-project 3)
+
+- **TOAST for large rows**: Rows exceeding 2000 bytes automatically move largest VARCHAR fields to overflow pages
+- **TOAST pointer**: 11-byte inline pointer (tag 0x07 + page_id + offset + length) replaces the oversized field
+- **Detoast on read**: `detoast_row_bytes()` resolves pointers back to original data transparently
+- **Value stays clean**: TOAST interception at raw bytes level -- Value enum unchanged
+- New file: `src/storage/toast.rs`
+
 ## 2026-03-27 - PageFile + FSM (sub-project 2)
 
 - **Multi-page file manager**: `PageFile` manages a file as a sequence of 8KB pages with mmap for zero-copy reads

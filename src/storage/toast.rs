@@ -222,6 +222,44 @@ pub fn detoast_row_bytes(row_bytes: &[u8], page_file: &mut PageFile) -> Result<V
     Ok(result)
 }
 
+/// Free overflow data referenced by TOAST pointers in a row.
+///
+/// Scans for TOAST_TAG entries and updates the FSM for the referenced
+/// overflow pages. Does not deallocate pages (GC is future work).
+pub fn free_toast_data(row_bytes: &[u8], page_file: &mut PageFile) -> Result<()> {
+    if row_bytes.len() < 2 {
+        return Ok(());
+    }
+
+    let col_count = u16::from_le_bytes(row_bytes[0..2].try_into().unwrap()) as usize;
+    let values_area_start = 2 + col_count * 2;
+    let mut cursor = values_area_start;
+
+    for _col in 0..col_count {
+        if cursor >= row_bytes.len() {
+            break;
+        }
+
+        let tag = row_bytes[cursor];
+        if tag == TOAST_TAG {
+            let (page_id, _offset, _length) = decode_toast_pointer(&row_bytes[cursor..])?;
+            cursor += TOAST_POINTER_SIZE;
+
+            // Update FSM to reflect that the overflow page has more free space
+            // (simplified: mark the entire page as mostly free)
+            let page = page_file.read_page(page_id)?;
+            let used = page.header_free_space_start() as usize;
+            let available = PAGE_SIZE - used;
+            page_file.update_fsm(page_id, available)?;
+        } else {
+            let (_, consumed) = Value::from_bytes(&row_bytes[cursor..])?;
+            cursor += consumed;
+        }
+    }
+
+    Ok(())
+}
+
 /// Write data to an overflow page, allocating a new one if needed.
 ///
 /// Returns (page_id, offset_within_data_area).
@@ -417,6 +455,42 @@ mod tests {
         let detoasted = detoast_row_bytes(&toasted, &mut pf).unwrap();
         let original = serialize_row_for_page(&values);
         assert_eq!(detoasted, original);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_free_toast_data() {
+        let path = temp_path("test_free.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let values = vec![Value::Int32(1), Value::varchar("z".repeat(3000))];
+        let toasted = toast_row(&values, &mut pf).unwrap();
+
+        // Record page count before free
+        let pages_before = pf.page_count();
+
+        // Free should not error
+        free_toast_data(&toasted, &mut pf).unwrap();
+
+        // Page count unchanged (we don't deallocate overflow pages)
+        assert_eq!(pf.page_count(), pages_before);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_free_toast_no_pointers() {
+        let path = temp_path("test_free_noop.pages");
+        cleanup(&path);
+        let mut pf = PageFile::open(&path).unwrap();
+
+        let values = vec![Value::Int32(1)];
+        let row_bytes = serialize_row_for_page(&values);
+
+        // No toast pointers -- should be a no-op
+        free_toast_data(&row_bytes, &mut pf).unwrap();
 
         cleanup(&path);
     }
