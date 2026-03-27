@@ -1,5 +1,11 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Batch I/O for indexed fetches
+
+- **Clustered batch reads**: `DataFile::read_batch_sequential()` groups adjacent entries (gap < 64KB) into clusters, reading each cluster with a single I/O operation instead of per-row seek+read
+- **Reduced syscalls**: `TableEngine::fetch_rows_sorted_by_offset()` now delegates to batch reader, cutting syscalls from O(n) to O(clusters) for sequentially-inserted rows
+- Memory backend iterates directly (no syscall overhead to avoid)
+
 ## 2026-03-27 - Query optimizer improvements
 
 - **Filter cost-based reordering**: Filters sorted by estimated cost before evaluation — cheap checks (null, integer equality) short-circuit before expensive ones (LIKE, IN)

@@ -11,6 +11,9 @@ const ACTIVE_MARKER: u8 = 0x00;
 /// BufWriter capacity: 256 KB
 const BUF_WRITER_CAPACITY: usize = 256 * 1024;
 
+/// Maximum gap between consecutive rows to include in the same batch read.
+const BATCH_GAP_THRESHOLD: u64 = 64 * 1024;
+
 enum DataFileBackend {
     #[allow(dead_code)]
     File(BufWriter<File>),
@@ -447,6 +450,98 @@ impl DataFile {
                 }
 
                 Ok(Some(f(&slice[5..])))
+            }
+        }
+    }
+
+    /// Read multiple rows in batched sequential I/O.
+    ///
+    /// Groups adjacent entries into clusters (gap < 64KB) and reads each
+    /// cluster with a single I/O operation. Entries MUST be sorted by offset.
+    pub fn read_batch_sequential(
+        &mut self,
+        entries: &[(u64, u32)],
+    ) -> Result<Vec<Row>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        match &mut self.backend {
+            DataFileBackend::File(writer) => {
+                if self.dirty {
+                    writer.flush()?;
+                    self.dirty = false;
+                }
+                let file = writer.get_mut();
+                let mut rows = Vec::with_capacity(entries.len());
+
+                // Group into clusters of adjacent entries
+                let mut cluster_start = 0usize;
+                for i in 1..=entries.len() {
+                    let start_new_cluster = if i == entries.len() {
+                        true
+                    } else {
+                        let prev_end = entries[i - 1].0 + 1 + 4 + entries[i - 1].1 as u64;
+                        entries[i].0 - prev_end > BATCH_GAP_THRESHOLD
+                    };
+
+                    if start_new_cluster {
+                        // Read this cluster
+                        let first_offset = entries[cluster_start].0;
+                        let last = &entries[i - 1];
+                        let cluster_end = last.0 + 1 + 4 + last.1 as u64;
+                        let cluster_size = (cluster_end - first_offset) as usize;
+
+                        if self.read_buffer.len() < cluster_size {
+                            self.read_buffer.resize(cluster_size, 0);
+                        }
+
+                        file.seek(SeekFrom::Start(first_offset))?;
+                        file.read_exact(&mut self.read_buffer[..cluster_size])?;
+
+                        // Extract rows from the cluster buffer
+                        for entry in &entries[cluster_start..i] {
+                            let rel_offset = (entry.0 - first_offset) as usize;
+                            let total = 1 + 4 + entry.1 as usize;
+                            let record = &self.read_buffer[rel_offset..rel_offset + total];
+
+                            if record[0] != TOMBSTONE_MARKER {
+                                let stored_len = u32::from_le_bytes(
+                                    record[1..5].try_into().unwrap(),
+                                );
+                                if stored_len == entry.1 {
+                                    rows.push(Row::from_bytes(&record[5..total])?);
+                                }
+                            }
+                        }
+
+                        cluster_start = i;
+                    }
+                }
+
+                Ok(rows)
+            }
+            DataFileBackend::Memory(data) => {
+                // Memory backend: no I/O benefit from batching, just iterate
+                let mut rows = Vec::with_capacity(entries.len());
+                for &(offset, length) in entries {
+                    let start = offset as usize;
+                    let total = 1 + 4 + length as usize;
+                    let end = start + total;
+                    if end > data.len() {
+                        continue;
+                    }
+                    let record = &data[start..end];
+                    if record[0] != TOMBSTONE_MARKER {
+                        let stored_len = u32::from_le_bytes(
+                            record[1..5].try_into().unwrap(),
+                        );
+                        if stored_len == length {
+                            rows.push(Row::from_bytes(&record[5..total])?);
+                        }
+                    }
+                }
+                Ok(rows)
             }
         }
     }

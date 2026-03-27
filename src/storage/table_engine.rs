@@ -447,7 +447,7 @@ impl TableEngine {
     }
 
     /// Resolve RAT entries for the given row_ids, sort by on-disk offset,
-    /// and read rows sequentially to avoid scattered seeks.
+    /// and read rows in batched sequential I/O to reduce syscalls.
     fn fetch_rows_sorted_by_offset(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
         let mut entries: Vec<(u64, u32)> = Vec::with_capacity(row_ids.len());
         for &row_id in row_ids {
@@ -458,13 +458,7 @@ impl TableEngine {
 
         entries.sort_unstable_by_key(|&(offset, _)| offset);
 
-        let mut rows = Vec::with_capacity(entries.len());
-        for (offset, length) in entries {
-            if let Some(row) = self.data_file.read_row(offset, length)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        self.data_file.read_batch_sequential(&entries)
     }
 
     /// Get the number of active rows without scanning (O(1))
