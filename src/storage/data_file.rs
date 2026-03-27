@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::storage::row::Row;
+use memmap2::Mmap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,11 @@ enum DataFileBackend {
     #[allow(dead_code)]
     File(BufWriter<File>),
     Memory(Vec<u8>),
+    Mmap {
+        writer: BufWriter<File>,
+        map: Option<Mmap>,
+        stale: bool,
+    },
 }
 
 /// Manages the append-only data.bin file
@@ -110,6 +116,59 @@ impl DataFile {
         })
     }
 
+    /// Open a data file with memory-mapped I/O for reads.
+    pub fn open_mmap<P: AsRef<Path>>(path: P, fsync_on_write: bool) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+
+        let current_offset = file.metadata()?.len();
+
+        let map = if current_offset > 0 {
+            Some(unsafe { Mmap::map(&file)? })
+        } else {
+            None
+        };
+
+        let writer = BufWriter::with_capacity(BUF_WRITER_CAPACITY, file);
+
+        Ok(Self {
+            path,
+            backend: DataFileBackend::Mmap {
+                writer,
+                map,
+                stale: false,
+            },
+            current_offset,
+            fsync_on_write,
+            write_buffer: Vec::with_capacity(8192),
+            read_buffer: Vec::new(),
+            last_sync: None,
+            group_commit_ms: 0,
+            dirty: false,
+        })
+    }
+
+    /// Remap the mmap after writes to see new data.
+    fn remap(&mut self) -> Result<()> {
+        if let DataFileBackend::Mmap { writer, map, stale } = &mut self.backend {
+            if *stale {
+                writer.flush()?;
+                let file = writer.get_mut();
+                file.sync_all()?;
+                let file_len = file.metadata()?.len();
+                if file_len > 0 {
+                    *map = Some(unsafe { Mmap::map(&*file)? });
+                }
+                *stale = false;
+            }
+        }
+        Ok(())
+    }
+
     /// Append a row to the data file
     ///
     /// # Arguments
@@ -145,6 +204,14 @@ impl DataFile {
                 data.push(ACTIVE_MARKER);
                 data.extend_from_slice(&length.to_le_bytes());
                 data.extend_from_slice(&self.write_buffer);
+            }
+            DataFileBackend::Mmap { writer, stale, .. } => {
+                writer.seek(SeekFrom::End(0))?;
+                writer.write_all(&[ACTIVE_MARKER])?;
+                writer.write_all(&length.to_le_bytes())?;
+                writer.write_all(&self.write_buffer)?;
+                *stale = true;
+                self.dirty = true;
             }
         }
 
@@ -207,6 +274,12 @@ impl DataFile {
             DataFileBackend::Memory(data) => {
                 data.extend_from_slice(&self.write_buffer);
             }
+            DataFileBackend::Mmap { writer, stale, .. } => {
+                writer.seek(SeekFrom::End(0))?;
+                writer.write_all(&self.write_buffer)?;
+                *stale = true;
+                self.dirty = true;
+            }
         }
 
         self.current_offset += total_bytes;
@@ -226,6 +299,7 @@ impl DataFile {
     /// # Returns
     /// The deserialized Row, or None if row is deleted
     pub fn read_row(&mut self, offset: u64, length: u32) -> Result<Option<Row>> {
+        self.remap()?;
         let total_to_read = 1 + 4 + length as usize;
 
         match &mut self.backend {
@@ -299,6 +373,41 @@ impl DataFile {
                 let row = Row::from_bytes(&slice[5..])?;
                 Ok(Some(row))
             }
+            DataFileBackend::Mmap { map, .. } => {
+                if let Some(map) = map {
+                    let start = offset as usize;
+                    let end = start + total_to_read;
+                    if end > map.len() {
+                        return Err(Error::Storage(format!(
+                            "Read out of bounds: {} > {}",
+                            end,
+                            map.len()
+                        )));
+                    }
+
+                    let slice = &map[start..end];
+
+                    if slice[0] == TOMBSTONE_MARKER {
+                        return Ok(None);
+                    }
+
+                    let mut length_buf = [0u8; 4];
+                    length_buf.copy_from_slice(&slice[1..5]);
+                    let stored_length = u32::from_le_bytes(length_buf);
+
+                    if stored_length != length {
+                        return Err(Error::Storage(format!(
+                            "Length mismatch at offset {}: expected {}, found {}",
+                            offset, length, stored_length
+                        )));
+                    }
+
+                    let row = Row::from_bytes(&slice[5..])?;
+                    Ok(Some(row))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
@@ -307,6 +416,7 @@ impl DataFile {
     /// Like `read_row()` but returns the raw byte buffer instead of
     /// calling `Row::from_bytes()`. Returns `None` for tombstoned rows.
     pub fn read_raw(&mut self, offset: u64, length: u32) -> Result<Option<Vec<u8>>> {
+        self.remap()?;
         let total_to_read = 1 + 4 + length as usize;
 
         match &mut self.backend {
@@ -372,6 +482,40 @@ impl DataFile {
 
                 Ok(Some(slice[5..].to_vec()))
             }
+            DataFileBackend::Mmap { map, .. } => {
+                if let Some(map) = map {
+                    let start = offset as usize;
+                    let end = start + total_to_read;
+                    if end > map.len() {
+                        return Err(Error::Storage(format!(
+                            "Read out of bounds: {} > {}",
+                            end,
+                            map.len()
+                        )));
+                    }
+
+                    let slice = &map[start..end];
+
+                    if slice[0] == TOMBSTONE_MARKER {
+                        return Ok(None);
+                    }
+
+                    let mut length_buf = [0u8; 4];
+                    length_buf.copy_from_slice(&slice[1..5]);
+                    let stored_length = u32::from_le_bytes(length_buf);
+
+                    if stored_length != length {
+                        return Err(Error::Storage(format!(
+                            "Length mismatch at offset {}: expected {}, found {}",
+                            offset, length, stored_length
+                        )));
+                    }
+
+                    Ok(Some(slice[5..].to_vec()))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
@@ -389,6 +533,7 @@ impl DataFile {
     where
         F: FnOnce(&[u8]) -> R,
     {
+        self.remap()?;
         let total_to_read = 1 + 4 + length as usize;
 
         match &mut self.backend {
@@ -451,6 +596,39 @@ impl DataFile {
 
                 Ok(Some(f(&slice[5..])))
             }
+            DataFileBackend::Mmap { map, .. } => {
+                if let Some(map) = map {
+                    let start = offset as usize;
+                    let end = start + total_to_read;
+                    if end > map.len() {
+                        return Err(Error::Storage(format!(
+                            "Read out of bounds: {} > {}",
+                            end,
+                            map.len()
+                        )));
+                    }
+
+                    let slice = &map[start..end];
+
+                    if slice[0] == TOMBSTONE_MARKER {
+                        return Ok(None);
+                    }
+
+                    let stored_length = u32::from_le_bytes(
+                        slice[1..5].try_into().unwrap(),
+                    );
+                    if stored_length != length {
+                        return Err(Error::Storage(format!(
+                            "Length mismatch at offset {}: expected {}, found {}",
+                            offset, length, stored_length
+                        )));
+                    }
+
+                    Ok(Some(f(&slice[5..])))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
@@ -465,6 +643,8 @@ impl DataFile {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
+
+        self.remap()?;
 
         match &mut self.backend {
             DataFileBackend::File(writer) => {
@@ -543,6 +723,31 @@ impl DataFile {
                 }
                 Ok(rows)
             }
+            DataFileBackend::Mmap { map, .. } => {
+                let data = match map {
+                    Some(m) => &m[..],
+                    None => return Ok(Vec::new()),
+                };
+                let mut rows = Vec::with_capacity(entries.len());
+                for &(offset, length) in entries {
+                    let start = offset as usize;
+                    let total = 1 + 4 + length as usize;
+                    let end = start + total;
+                    if end > data.len() {
+                        continue;
+                    }
+                    let record = &data[start..end];
+                    if record[0] != TOMBSTONE_MARKER {
+                        let stored_len = u32::from_le_bytes(
+                            record[1..5].try_into().unwrap(),
+                        );
+                        if stored_len == length {
+                            rows.push(Row::from_bytes(&record[5..total])?);
+                        }
+                    }
+                }
+                Ok(rows)
+            }
         }
     }
 
@@ -574,6 +779,13 @@ impl DataFile {
                     return Err(Error::Storage(format!("Mark deleted out of bounds: {} >= {}", idx, data.len())));
                 }
             }
+            DataFileBackend::Mmap { writer, stale, .. } => {
+                writer.flush()?;
+                let file = writer.get_mut();
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&[TOMBSTONE_MARKER])?;
+                *stale = true;
+            }
         }
 
         // Group-commit-aware sync
@@ -584,11 +796,20 @@ impl DataFile {
 
     /// Force synchronize file to disk (always syncs regardless of group commit timer)
     pub fn sync(&mut self) -> Result<()> {
-        if let DataFileBackend::File(writer) = &mut self.backend {
-            writer.flush()?;
-            writer.get_mut().sync_all()?;
-            self.last_sync = Some(std::time::Instant::now());
-            self.dirty = false;
+        match &mut self.backend {
+            DataFileBackend::File(writer) => {
+                writer.flush()?;
+                writer.get_mut().sync_all()?;
+                self.last_sync = Some(std::time::Instant::now());
+                self.dirty = false;
+            }
+            DataFileBackend::Mmap { writer, .. } => {
+                writer.flush()?;
+                writer.get_mut().sync_all()?;
+                self.last_sync = Some(std::time::Instant::now());
+                self.dirty = false;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -602,25 +823,29 @@ impl DataFile {
             return Ok(());
         }
 
-        if let DataFileBackend::File(writer) = &mut self.backend {
-            if self.group_commit_ms == 0 {
-                // Immediate sync
+        let writer = match &mut self.backend {
+            DataFileBackend::File(writer) => writer,
+            DataFileBackend::Mmap { writer, .. } => writer,
+            _ => return Ok(()),
+        };
+
+        if self.group_commit_ms == 0 {
+            // Immediate sync
+            writer.flush()?;
+            writer.get_mut().sync_all()?;
+            self.last_sync = Some(std::time::Instant::now());
+            self.dirty = false;
+        } else {
+            // Group commit: only sync if threshold exceeded
+            let should_sync = match self.last_sync {
+                None => true,
+                Some(last) => last.elapsed().as_millis() >= self.group_commit_ms as u128,
+            };
+            if should_sync {
                 writer.flush()?;
                 writer.get_mut().sync_all()?;
                 self.last_sync = Some(std::time::Instant::now());
                 self.dirty = false;
-            } else {
-                // Group commit: only sync if threshold exceeded
-                let should_sync = match self.last_sync {
-                    None => true,
-                    Some(last) => last.elapsed().as_millis() >= self.group_commit_ms as u128,
-                };
-                if should_sync {
-                    writer.flush()?;
-                    writer.get_mut().sync_all()?;
-                    self.last_sync = Some(std::time::Instant::now());
-                    self.dirty = false;
-                }
             }
         }
         Ok(())
@@ -628,6 +853,7 @@ impl DataFile {
 
     /// Scan active rows with an optional limit for early termination
     pub fn scan_rows_limited(&mut self, limit: Option<usize>) -> Result<Vec<Row>> {
+        self.remap()?;
         let max_rows = limit.unwrap_or(usize::MAX);
         let mut results = Vec::new();
         let mut row_buffer = Vec::with_capacity(1024);
@@ -696,6 +922,36 @@ impl DataFile {
                     cursor += length;
                 }
             }
+            DataFileBackend::Mmap { map, .. } => {
+                let data = match map {
+                    Some(m) => &m[..],
+                    None => return Ok(Vec::new()),
+                };
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    if results.len() >= max_rows {
+                        break;
+                    }
+                    if cursor + 1 + 4 > data.len() {
+                        break;
+                    }
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let mut length_buf = [0u8; 4];
+                    length_buf.copy_from_slice(&data[cursor..cursor + 4]);
+                    let length = u32::from_le_bytes(length_buf) as usize;
+                    cursor += 4;
+
+                    if cursor + length > data.len() {
+                        break;
+                    }
+                    if marker != TOMBSTONE_MARKER {
+                        results.push(Row::from_bytes(&data[cursor..cursor + length])?);
+                    }
+                    cursor += length;
+                }
+            }
         }
 
         Ok(results)
@@ -729,6 +985,7 @@ impl DataFile {
     where
         F: Fn(&[u8]) -> bool,
     {
+        self.remap()?;
         let max_rows = limit.unwrap_or(usize::MAX);
         let mut results = Vec::new();
         let mut row_buffer = Vec::with_capacity(1024);
@@ -802,6 +1059,38 @@ impl DataFile {
                     cursor += length;
                 }
             }
+            DataFileBackend::Mmap { map, .. } => {
+                let data = match map {
+                    Some(m) => &m[..],
+                    None => return Ok(Vec::new()),
+                };
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    if results.len() >= max_rows {
+                        break;
+                    }
+                    if cursor + 1 + 4 > data.len() {
+                        break;
+                    }
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let length = u32::from_le_bytes(
+                        data[cursor..cursor + 4].try_into().unwrap(),
+                    ) as usize;
+                    cursor += 4;
+
+                    if cursor + length > data.len() {
+                        break;
+                    }
+                    if marker != TOMBSTONE_MARKER {
+                        if predicate(&data[cursor..cursor + length]) {
+                            results.push(Row::from_bytes(&data[cursor..cursor + length])?);
+                        }
+                    }
+                    cursor += length;
+                }
+            }
         }
 
         Ok(results)
@@ -815,6 +1104,7 @@ impl DataFile {
     where
         F: Fn(&[u8]) -> bool,
     {
+        self.remap()?;
         let mut count = 0usize;
         let mut row_buffer = Vec::with_capacity(1024);
 
@@ -879,6 +1169,33 @@ impl DataFile {
                     cursor += length;
                 }
             }
+            DataFileBackend::Mmap { map, .. } => {
+                let data = match map {
+                    Some(m) => &m[..],
+                    None => return Ok(0),
+                };
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    if cursor + 1 + 4 > data.len() {
+                        break;
+                    }
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let length = u32::from_le_bytes(
+                        data[cursor..cursor + 4].try_into().unwrap(),
+                    ) as usize;
+                    cursor += 4;
+
+                    if cursor + length > data.len() {
+                        break;
+                    }
+                    if marker != TOMBSTONE_MARKER && predicate(&data[cursor..cursor + length]) {
+                        count += 1;
+                    }
+                    cursor += length;
+                }
+            }
         }
 
         Ok(count)
@@ -888,6 +1205,7 @@ impl DataFile {
     ///
     /// Returns vector of (offset, length, row_id, deleted) tuples
     pub fn scan_all(&mut self) -> Result<Vec<(u64, u32, u64, bool)>> {
+        self.remap()?;
         let mut results = Vec::new();
 
         match &mut self.backend {
@@ -942,6 +1260,30 @@ impl DataFile {
 
                     let mut row_id_buf = [0u8; 8];
                     row_id_buf.copy_from_slice(&data[cursor..cursor+8]);
+                    let row_id = u64::from_le_bytes(row_id_buf);
+
+                    results.push((offset, length, row_id, marker == TOMBSTONE_MARKER));
+                    cursor += length as usize;
+                }
+            }
+            DataFileBackend::Mmap { map, .. } => {
+                let data = match map {
+                    Some(m) => &m[..],
+                    None => return Ok(Vec::new()),
+                };
+                let mut cursor = 0usize;
+                while cursor < data.len() {
+                    let offset = cursor as u64;
+                    let marker = data[cursor];
+                    cursor += 1;
+
+                    let mut length_buf = [0u8; 4];
+                    length_buf.copy_from_slice(&data[cursor..cursor + 4]);
+                    let length = u32::from_le_bytes(length_buf);
+                    cursor += 4;
+
+                    let mut row_id_buf = [0u8; 8];
+                    row_id_buf.copy_from_slice(&data[cursor..cursor + 8]);
                     let row_id = u64::from_le_bytes(row_id_buf);
 
                     results.push((offset, length, row_id, marker == TOMBSTONE_MARKER));
