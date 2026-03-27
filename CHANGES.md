@@ -1,5 +1,15 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Rewire TableEngine to PagedTable (sub-project 4, tasks 4-6)
+
+- **PagedTable replaces DataFile+RAT**: `TableEngine` now uses slotted-page storage (`pages.bin`) instead of append-only `data.bin` + `rat.bin`
+- **Ctid-based row IDs**: Row IDs are now packed (page_id, slot_index) ctids instead of sequential integers
+- **Removed RAT-specific methods**: `rebuild_rat()`, `active_row_ids()`, `fetch_rows_sorted_by_offset()` removed
+- **Compact is no-op**: `compact()` and `full_compact()` are no-ops; page compaction is future work
+- **Auto-compact removed**: Delete no longer triggers auto-compaction
+- **flush() simplified**: PageFile uses mmap, no explicit flush needed
+- **stats() simplified**: `total_rows` == `active_rows` (no separate tombstone tracking), `data_file_size` is 0
+
 ## 2026-03-27 - TOAST overflow (sub-project 3)
 
 - **TOAST for large rows**: Rows exceeding 2000 bytes automatically move largest VARCHAR fields to overflow pages
