@@ -408,6 +408,39 @@ impl TableEngine {
         self.fetch_rows_sorted_by_offset(row_ids)
     }
 
+    /// Get multiple rows by ID, filtering on raw bytes before deserializing.
+    ///
+    /// Like `get_by_ids()` but applies a predicate to the raw row bytes.
+    /// Only rows where `predicate` returns `true` are deserialized.
+    /// Use `Row::value_at()` inside the predicate for column-level checks.
+    pub fn get_by_ids_filtered<F>(
+        &mut self,
+        row_ids: &[u64],
+        predicate: F,
+    ) -> Result<Vec<Row>>
+    where
+        F: Fn(&[u8]) -> bool,
+    {
+        let mut entries: Vec<(u64, u32)> = Vec::with_capacity(row_ids.len());
+        for &row_id in row_ids {
+            if let Some((offset, length)) = self.rat.get(row_id) {
+                entries.push((offset, length));
+            }
+        }
+
+        entries.sort_unstable_by_key(|&(offset, _)| offset);
+
+        let mut rows = Vec::with_capacity(entries.len());
+        for (offset, length) in entries {
+            if let Some(raw) = self.data_file.read_raw(offset, length)? {
+                if predicate(&raw) {
+                    rows.push(Row::from_bytes(&raw)?);
+                }
+            }
+        }
+        Ok(rows)
+    }
+
     /// Resolve RAT entries for the given row_ids, sort by on-disk offset,
     /// and read rows sequentially to avoid scattered seeks.
     fn fetch_rows_sorted_by_offset(&mut self, row_ids: &[u64]) -> Result<Vec<Row>> {
