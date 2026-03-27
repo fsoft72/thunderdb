@@ -87,8 +87,8 @@ fn test_select_from_non_existent_table_errors() -> Result<()> {
         // This should succeed and create the table
     
         let row_id = db.insert_row("new_table", vec![Value::Int32(123)])?;
-    
-        assert_eq!(row_id, 1);
+
+        assert!(row_id > 0);
     
         
     

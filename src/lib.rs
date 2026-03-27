@@ -22,6 +22,7 @@ pub mod repl;
 pub use config::{DatabaseConfig, load_config, save_config};
 pub use error::{Error, Result};
 pub use storage::{Value, Row, TableEngine};
+use storage::page::value_at_page_bytes;
 pub use index::{IndexManager};
 pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters, multi_index_scan};
 pub use parser::{parse_sql, Statement, PreparedCache};
@@ -180,8 +181,8 @@ impl Database {
                         if let Ok(file_type) = entry.file_type() {
                             if file_type.is_dir() {
                                 if let Some(name) = entry.file_name().to_str() {
-                                    // Check if it's a valid table directory (contains data.bin)
-                                    if entry.path().join("data.bin").exists() {
+                                    // Check if it's a valid table directory (contains pages.bin)
+                                    if entry.path().join("pages.bin").exists() {
                                         table_names.insert(name.to_string());
                                     }
                                 }
@@ -344,7 +345,7 @@ impl DirectDataAccess for Database {
                 let rows = table_engine.get_by_ids_filtered(&row_ids, |raw_bytes| {
                     for (filter, col_idx) in remaining_filters.iter().zip(rem_col_indices.iter()) {
                         if let Some(idx) = col_idx {
-                            match Row::value_at(raw_bytes, *idx) {
+                            match value_at_page_bytes(raw_bytes, *idx) {
                                 Ok(val) => {
                                     if !filter.matches(&val) {
                                         return false;
@@ -392,7 +393,7 @@ impl DirectDataAccess for Database {
                         let rows = table_engine.get_by_ids_filtered(&row_ids, |raw_bytes| {
                             for (filter, col_idx) in remaining.iter().zip(rem_col_indices.iter()) {
                                 if let Some(idx) = col_idx {
-                                    match Row::value_at(raw_bytes, *idx) {
+                                    match value_at_page_bytes(raw_bytes, *idx) {
                                         Ok(val) => {
                                             if !filter.matches(&val) {
                                                 return false;
@@ -458,7 +459,7 @@ impl DirectDataAccess for Database {
                 let rows = table_engine.scan_all_filtered(|raw_bytes| {
                     for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
                         if let Some(idx) = col_idx {
-                            match Row::value_at(raw_bytes, *idx) {
+                            match value_at_page_bytes(raw_bytes, *idx) {
                                 Ok(val) => {
                                     if !filter.matches(&val) {
                                         return false;
@@ -645,7 +646,7 @@ impl DirectDataAccess for Database {
         table_engine.count_filtered(|raw_bytes| {
             for (filter, col_idx) in filters.iter().zip(filter_col_indices.iter()) {
                 if let Some(idx) = col_idx {
-                    match Row::value_at(raw_bytes, *idx) {
+                    match value_at_page_bytes(raw_bytes, *idx) {
                         Ok(val) => {
                             if !filter.matches(&val) {
                                 return false;

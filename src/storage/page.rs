@@ -110,6 +110,43 @@ impl PageHeader {
 /// Serialize row values for page storage (no row_id, u16 col_count).
 ///
 /// Format: [col_count: u16][off0: u16]...[offN-1: u16][val0]...[valN-1]
+/// Extract a single column value from page-format row bytes.
+///
+/// Page row format: `[col_count: u16][offsets: u16 * N][values_data]`.
+/// Returns the deserialized `Value` at the given column index.
+pub fn value_at_page_bytes(bytes: &[u8], col_idx: usize) -> Result<Value> {
+    if bytes.len() < 2 {
+        return Err(Error::Serialization("Row too short for col_count".to_string()));
+    }
+
+    let col_count = u16::from_le_bytes(bytes[0..2].try_into().unwrap()) as usize;
+
+    if col_idx >= col_count {
+        return Err(Error::Serialization(format!(
+            "Column index {} out of bounds (row has {} columns)",
+            col_idx, col_count
+        )));
+    }
+
+    let offsets_start = 2usize;
+    let values_area_start = offsets_start + col_count * 2;
+
+    let off_pos = offsets_start + col_idx * 2;
+    let col_offset = u16::from_le_bytes(
+        bytes[off_pos..off_pos + 2].try_into().unwrap(),
+    ) as usize;
+
+    let value_pos = values_area_start + col_offset;
+    if value_pos >= bytes.len() {
+        return Err(Error::Serialization(
+            "Column offset points past end of row data".to_string(),
+        ));
+    }
+
+    let (value, _) = Value::from_bytes(&bytes[value_pos..])?;
+    Ok(value)
+}
+
 pub fn serialize_row_for_page(values: &[Value]) -> Vec<u8> {
     let col_count = values.len();
     let mut values_buf = Vec::with_capacity(col_count * 8);
@@ -331,41 +368,12 @@ impl Page {
     /// Extract a single column value from a row without full deserialization.
     ///
     /// Uses the column-offset array in the page row format (u16 col_count).
+    /// Extract a single column value from a slot without full deserialization.
     pub fn value_at(&self, slot_index: u16, col_idx: usize) -> Result<Value> {
         let row_data = self.get_row(slot_index).ok_or_else(|| {
             Error::Storage(format!("Slot {} is free or out of bounds", slot_index))
         })?;
-
-        if row_data.len() < 2 {
-            return Err(Error::Serialization("Row too short for col_count".to_string()));
-        }
-
-        let col_count = u16::from_le_bytes(row_data[0..2].try_into().unwrap()) as usize;
-
-        if col_idx >= col_count {
-            return Err(Error::Serialization(format!(
-                "Column index {} out of bounds (row has {} columns)",
-                col_idx, col_count
-            )));
-        }
-
-        let offsets_start = 2usize;
-        let values_area_start = offsets_start + col_count * 2;
-
-        let off_pos = offsets_start + col_idx * 2;
-        let col_offset = u16::from_le_bytes(
-            row_data[off_pos..off_pos + 2].try_into().unwrap(),
-        ) as usize;
-
-        let value_pos = values_area_start + col_offset;
-        if value_pos >= row_data.len() {
-            return Err(Error::Serialization(
-                "Column offset points past end of row data".to_string(),
-            ));
-        }
-
-        let (value, _) = Value::from_bytes(&row_data[value_pos..])?;
-        Ok(value)
+        value_at_page_bytes(row_data, col_idx)
     }
 }
 

@@ -1,14 +1,17 @@
 # ThunderDB Changes
 
-## 2026-03-27 - Rewire TableEngine to PagedTable (sub-project 4, tasks 4-6)
+## 2026-03-27 - Slotted page storage migration complete (sub-project 4)
 
-- **PagedTable replaces DataFile+RAT**: `TableEngine` now uses slotted-page storage (`pages.bin`) instead of append-only `data.bin` + `rat.bin`
-- **Ctid-based row IDs**: Row IDs are now packed (page_id, slot_index) ctids instead of sequential integers
-- **Removed RAT-specific methods**: `rebuild_rat()`, `active_row_ids()`, `fetch_rows_sorted_by_offset()` removed
-- **Compact is no-op**: `compact()` and `full_compact()` are no-ops; page compaction is future work
-- **Auto-compact removed**: Delete no longer triggers auto-compaction
-- **flush() simplified**: PageFile uses mmap, no explicit flush needed
-- **stats() simplified**: `total_rows` == `active_rows` (no separate tombstone tracking), `data_file_size` is 0
+- **PagedTable**: New CRUD layer over PageFile+Page+TOAST, replaces DataFile+RAT
+- **TableEngine rewrite**: All storage operations now use 8KB slotted pages with ctid addressing
+- **Ctid-based row IDs**: Row IDs are packed (page_id, slot_index) ctids instead of sequential integers
+- **Batch ctid fetch**: `get_rows_by_ctids()` groups reads by page_id for minimal page I/O
+- **Filtered ctid fetch**: `get_rows_by_ctids_filtered()` applies predicates on raw page bytes
+- **Automatic TOAST**: Insert automatically toasts rows > 2000 bytes; get automatically detoasts
+- **value_at_page_bytes()**: Standalone column extractor for page-format row bytes, used by query engine predicates
+- **Table discovery**: Changed from `data.bin` to `pages.bin` for table detection on disk
+- Removed DataFile and RAT dependency from TableEngine
+- New file: `src/storage/paged_table.rs`
 
 ## 2026-03-27 - TOAST overflow (sub-project 3)
 
