@@ -1,5 +1,10 @@
 # ThunderDB Changes
 
+## 2026-03-27 - Fix LikePattern: safe Finder construction and Eq impl
+
+- Replaced `unsafe` block in `LikePattern::new_contains` with `Finder::into_owned()` for safe, owned SIMD finder
+- Added `Eq` impl for `LikePattern` (was missing alongside `PartialEq`)
+
 ## 2026-03-27 - Use memchr SIMD for LIKE Contains matching
 
 - Added `memchr = "2"` as a direct dependency in `Cargo.toml`

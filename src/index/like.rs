@@ -41,6 +41,8 @@ impl PartialEq for LikePattern {
     }
 }
 
+impl Eq for LikePattern {}
+
 impl Clone for LikePattern {
     fn clone(&self) -> Self {
         match self {
@@ -55,19 +57,8 @@ impl Clone for LikePattern {
 
 impl LikePattern {
     /// Build a Contains variant with a pre-constructed SIMD Finder.
-    ///
-    /// # Safety
-    /// The Finder borrows from the needle's heap buffer. String heap data
-    /// has a stable address -- moving the struct does not move the heap
-    /// allocation -- so the Finder's internal pointer stays valid for the
-    /// lifetime of this enum variant.
     fn new_contains(needle: String) -> Self {
-        let ptr = needle.as_bytes().as_ptr();
-        let len = needle.as_bytes().len();
-        // SAFETY: needle is heap-allocated, lives alongside finder in the
-        // same enum variant, and is never mutated after construction.
-        let static_bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-        let finder = memchr::memmem::Finder::new(static_bytes);
+        let finder = memchr::memmem::Finder::new(needle.as_bytes()).into_owned();
         LikePattern::Contains { needle, finder }
     }
 
