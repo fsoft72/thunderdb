@@ -268,6 +268,34 @@ impl Page {
         Some(&self.data[start..end])
     }
 
+    /// Compact the page by rewriting active rows contiguously.
+    ///
+    /// Eliminates gaps left by deleted rows, reclaiming space into the
+    /// contiguous free area. Slot offsets are updated to point to the
+    /// new positions. Free slot list is preserved.
+    pub fn compact(&mut self) {
+        // Collect active rows: (slot_index, data)
+        let mut active_rows: Vec<(u16, Vec<u8>)> = Vec::new();
+        for i in 0..self.header.slot_count {
+            if let Some(row_data) = self.get_row(i) {
+                active_rows.push((i, row_data.to_vec()));
+            }
+        }
+
+        // Rewrite rows from the end of the page
+        let mut write_pos = PAGE_SIZE;
+        for (slot_index, row_data) in &active_rows {
+            write_pos -= row_data.len();
+            self.data[write_pos..write_pos + row_data.len()].copy_from_slice(row_data);
+
+            // Update slot offset
+            let slot_pos = PAGE_HEADER_SIZE + *slot_index as usize * SLOT_SIZE;
+            self.data[slot_pos..slot_pos + 2].copy_from_slice(&(write_pos as u16).to_le_bytes());
+        }
+
+        self.header.free_space_end = write_pos as u16;
+    }
+
     /// Delete a row by slot index. Returns false if the slot is already
     /// free or out of bounds.
     pub fn delete_row(&mut self, slot_index: u16) -> bool {
@@ -448,5 +476,45 @@ mod tests {
         let mut page = Page::new(0);
         assert!(!page.delete_row(0));
         assert!(!page.delete_row(999));
+    }
+
+    #[test]
+    fn test_compact() {
+        let mut page = Page::new(0);
+
+        let mut slots = Vec::new();
+        for i in 0..5 {
+            let data = serialize_row_for_page(&vec![
+                Value::Int32(i),
+                Value::varchar(format!("row_{}", i)),
+            ]);
+            slots.push(page.insert_row(&data).unwrap());
+        }
+
+        let space_before_delete = page.free_space();
+
+        // Delete rows 1 and 3 (creates gaps)
+        page.delete_row(slots[1]);
+        page.delete_row(slots[3]);
+        assert_eq!(page.active_count(), 3);
+
+        // Free space doesn't increase after delete (data gaps not reclaimed)
+        let space_after_delete = page.free_space();
+        assert_eq!(space_after_delete, space_before_delete);
+
+        // Compact reclaims the gaps
+        page.compact();
+        let space_after_compact = page.free_space();
+        assert!(space_after_compact > space_after_delete);
+        assert_eq!(page.active_count(), 3);
+
+        // Remaining rows still readable
+        assert!(page.get_row(slots[0]).is_some());
+        assert!(page.get_row(slots[2]).is_some());
+        assert!(page.get_row(slots[4]).is_some());
+
+        // Deleted slots still gone
+        assert!(page.get_row(slots[1]).is_none());
+        assert!(page.get_row(slots[3]).is_none());
     }
 }
