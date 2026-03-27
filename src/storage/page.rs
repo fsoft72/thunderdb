@@ -320,6 +320,46 @@ impl Page {
 
         true
     }
+
+    /// Extract a single column value from a row without full deserialization.
+    ///
+    /// Uses the column-offset array in the page row format (u16 col_count).
+    pub fn value_at(&self, slot_index: u16, col_idx: usize) -> Result<Value> {
+        let row_data = self.get_row(slot_index).ok_or_else(|| {
+            Error::Storage(format!("Slot {} is free or out of bounds", slot_index))
+        })?;
+
+        if row_data.len() < 2 {
+            return Err(Error::Serialization("Row too short for col_count".to_string()));
+        }
+
+        let col_count = u16::from_le_bytes(row_data[0..2].try_into().unwrap()) as usize;
+
+        if col_idx >= col_count {
+            return Err(Error::Serialization(format!(
+                "Column index {} out of bounds (row has {} columns)",
+                col_idx, col_count
+            )));
+        }
+
+        let offsets_start = 2usize;
+        let values_area_start = offsets_start + col_count * 2;
+
+        let off_pos = offsets_start + col_idx * 2;
+        let col_offset = u16::from_le_bytes(
+            row_data[off_pos..off_pos + 2].try_into().unwrap(),
+        ) as usize;
+
+        let value_pos = values_area_start + col_offset;
+        if value_pos >= row_data.len() {
+            return Err(Error::Serialization(
+                "Column offset points past end of row data".to_string(),
+            ));
+        }
+
+        let (value, _) = Value::from_bytes(&row_data[value_pos..])?;
+        Ok(value)
+    }
 }
 
 #[cfg(test)]
@@ -516,5 +556,32 @@ mod tests {
         // Deleted slots still gone
         assert!(page.get_row(slots[1]).is_none());
         assert!(page.get_row(slots[3]).is_none());
+    }
+
+    #[test]
+    fn test_value_at() {
+        let mut page = Page::new(0);
+        let values = vec![
+            Value::Int32(42),
+            Value::varchar("hello world".to_string()),
+            Value::Int64(999),
+        ];
+        let data = serialize_row_for_page(&values);
+        let slot = page.insert_row(&data).unwrap();
+
+        let v0 = page.value_at(slot, 0).unwrap();
+        assert_eq!(v0, Value::Int32(42));
+
+        let v1 = page.value_at(slot, 1).unwrap();
+        assert_eq!(v1, Value::varchar("hello world".to_string()));
+
+        let v2 = page.value_at(slot, 2).unwrap();
+        assert_eq!(v2, Value::Int64(999));
+
+        // Out of bounds column
+        assert!(page.value_at(slot, 3).is_err());
+
+        // Invalid slot
+        assert!(page.value_at(99, 0).is_err());
     }
 }
