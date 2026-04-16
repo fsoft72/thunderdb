@@ -196,4 +196,52 @@ mod tests {
         let r = h.run_one(&s, Tier::Small, Durability::Fast, CacheState::Warm);
         assert_eq!(r.verdict, Verdict::Win);
     }
+
+    #[test]
+    fn run_one_failure_when_thunder_panics() {
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small], durabilities: vec![Durability::Fast],
+            cache_states: vec![CacheState::Warm], sample_count: 3, update_baseline: false,
+        }};
+        let s = Scenario::new("crash", "test")
+            .setup(|t, m| build_blog_fixtures(t, m))
+            .thunder(|_f| panic!("boom"))
+            .sqlite(|_f| {})
+            .assert(|_f| Ok(()))
+            .build();
+        let r = h.run_one(&s, Tier::Small, Durability::Fast, CacheState::Warm);
+        assert!(matches!(r.verdict, Verdict::Failure(_)), "got {:?}", r.verdict);
+    }
+
+    #[test]
+    fn run_one_failure_when_assert_disagrees() {
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small], durabilities: vec![Durability::Fast],
+            cache_states: vec![CacheState::Warm], sample_count: 3, update_baseline: false,
+        }};
+        let s = Scenario::new("wrong_answer", "test")
+            .setup(|t, m| build_blog_fixtures(t, m))
+            .thunder(|_f| {})
+            .sqlite(|_f| {})
+            .assert(|_f| Err("mismatch".into()))
+            .build();
+        let r = h.run_one(&s, Tier::Small, Durability::Fast, CacheState::Warm);
+        assert!(matches!(r.verdict, Verdict::Failure(ref m) if m == "mismatch"), "got {:?}", r.verdict);
+    }
+
+    #[test]
+    fn run_one_durable_is_unsupported() {
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small], durabilities: vec![Durability::Durable],
+            cache_states: vec![CacheState::Warm], sample_count: 3, update_baseline: false,
+        }};
+        let s = Scenario::new("any", "test")
+            .setup(|t, m| build_blog_fixtures(t, m))
+            .thunder(|_f| {})
+            .sqlite(|_f| {})
+            .assert(|_f| Ok(()))
+            .build();
+        let r = h.run_one(&s, Tier::Small, Durability::Durable, CacheState::Warm);
+        assert_eq!(r.verdict, Verdict::Unsupported);
+    }
 }
