@@ -75,13 +75,18 @@ pub struct HarnessConfig {
 impl HarnessConfig {
     /// Build from env vars and cli args. Env var names:
     /// THUNDERDB_TIER, THUNDERDB_DURABILITY, THUNDERDB_CACHE.
-    /// CLI args supported: --update-baseline, --quick.
+    /// CLI args supported: --update-baseline, --quick (these libtest rejects
+    /// as unknown; use env vars THUNDERDB_UPDATE_BASELINE=1 and THUNDERDB_QUICK=1
+    /// when running via `cargo test`).
     pub fn from_env_and_args(args: &[String]) -> Self {
         let tiers = Tier::parse_set(&env::var("THUNDERDB_TIER").unwrap_or_default());
         let durabilities = Durability::parse_set(&env::var("THUNDERDB_DURABILITY").unwrap_or_default());
         let cache_states = CacheState::parse_set(&env::var("THUNDERDB_CACHE").unwrap_or_default());
-        let update_baseline = args.iter().any(|a| a == "--update-baseline");
-        let sample_count = if args.iter().any(|a| a == "--quick") { 3 } else { 11 };
+        let update_baseline = args.iter().any(|a| a == "--update-baseline")
+            || env::var("THUNDERDB_UPDATE_BASELINE").map(|v| v == "1" || v == "true").unwrap_or(false);
+        let quick = args.iter().any(|a| a == "--quick")
+            || env::var("THUNDERDB_QUICK").map(|v| v == "1" || v == "true").unwrap_or(false);
+        let sample_count = if quick { 3 } else { 11 };
         Self { tiers, durabilities, cache_states, sample_count, update_baseline }
     }
 
