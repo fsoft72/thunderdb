@@ -1,5 +1,25 @@
 # ThunderDB Changes
 
+## 2026-04-16 - Benchmark harness & fairness protocol (SP1 of 7)
+
+Foundation for the "faster than SQLite in all benchmarks" program.
+
+- **Shared harness** under `tests/perf/common/` — `Scenario` + fluent `ScenarioBuilder`, `Harness` driver with `run_scenarios` + `run_one` + end-to-end `run`, `HarnessConfig` built from env vars and CLI args, `Fixtures` with handle accessors and blog dataset builder for SMALL/MEDIUM/LARGE, `Verdict` band-based classification, `BenchResult` + `HarnessReport` with JSON schema v1, baseline load/save/diff/index, POSIX `fadvise(DONTNEED)` cold-cache preparation, median-of-N sample reduction with min/max drop.
+- **3×2×2 fairness matrix**: tier (SMALL/MEDIUM/LARGE) × durability (FAST/DURABLE) × cache (WARM/COLD). Env vars: `THUNDERDB_TIER`, `THUNDERDB_DURABILITY`, `THUNDERDB_CACHE`. Also `THUNDERDB_UPDATE_BASELINE=1` and `THUNDERDB_QUICK=1` since `cargo test` rejects unknown `--` args. DURABLE mode is `Unsupported` until SP6 lands.
+- **Band-based verdicts**: ratio <0.95 Win, [0.95, 1.05] Tie (acceptable), >1.05 Loss. Panics and assert-mismatches surface as `Failure` and fail the test independent of timing.
+- **Baseline comparison**: `perf/baseline.json` committed to repo; `THUNDERDB_UPDATE_BASELINE=1` promotes a run; `vs Base` column shows per-scenario delta against last baseline.
+- **Migrated 11 read-path scenarios** from `tests/integration/thunderdb_vs_sqlite_bench.rs` (now deleted) to `tests/perf/vs_sqlite_read.rs`. Current scoreboard at SMALL/FAST/WARM: **9 Win, 1 Tie, 1 Loss** (the Loss is Full table scan at 2x — tracked for SP2).
+- **New finding from COLD cache measurements**: at SMALL/FAST/COLD, 10 of 11 scenarios regress significantly (up to 148x on scenario 7) because Thunder pays substantial index-load and mmap-fault cost on every reopen. Logged as evidence for a future cold-start optimization sub-project.
+- **Harness self-tests** in `tests/perf/harness_selftest.rs` validate Win/Tie/Loss/Unsupported/Failure classification, panic-to-Failure conversion, assert-mismatch surfacing, and COLD reopen behavior.
+- **26 implementation commits** under `docs/superpowers/plans/2026-04-16-benchmark-harness.md`.
+
+New files: `perf/baseline.json` (committed), `tests/perf/common/{verdict,fairness,cache,report,baseline,fixtures,scenario,runner,mod}.rs`, `tests/perf/vs_sqlite_read.rs`, `tests/perf/harness_selftest.rs`.
+Deleted: `tests/integration/thunderdb_vs_sqlite_bench.rs`.
+New dev-dep: `libc` (unix-only, for `posix_fadvise`).
+
+Spec: `docs/superpowers/specs/2026-04-16-benchmark-harness-design.md`
+Plan: `docs/superpowers/plans/2026-04-16-benchmark-harness.md`
+
 ## 2026-03-27 - EQ/IN/count performance (4 changes)
 
 Four optimizations targeting indexed lookup and count paths:

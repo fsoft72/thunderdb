@@ -85,10 +85,6 @@ path = "tests/integration/join_test.rs"
 name = "stress_1m"
 path = "tests/stress_1m.rs"
 
-[[test]]
-name = "thunderdb_vs_sqlite_bench"
-path = "tests/integration/thunderdb_vs_sqlite_bench.rs"
-
 [[bench]]
 name = "stress_bench"
 harness = false
