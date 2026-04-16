@@ -1,4 +1,97 @@
+//! End-to-end harness self-tests using synthetic scenarios.
+
 mod common;
 
+use common::*;
+use std::thread::sleep;
+use std::time::Duration;
+
+fn mini_config(cache: CacheState, mode: Durability) -> HarnessConfig {
+    HarnessConfig {
+        tiers: vec![Tier::Small],
+        durabilities: vec![mode],
+        cache_states: vec![cache],
+        sample_count: 3,
+        update_baseline: false,
+    }
+}
+
 #[test]
-fn placeholder() {}
+fn both_engines_tie() {
+    let h = Harness { config: mini_config(CacheState::Warm, Durability::Fast) };
+    let s = vec![Scenario::new("tie_1ms", "self")
+        .setup(|t, m| build_blog_fixtures(t, m))
+        .thunder(|_f| sleep(Duration::from_millis(1)))
+        .sqlite(|_f| sleep(Duration::from_millis(1)))
+        .assert(|_f| Ok(()))
+        .build()];
+    let r = h.run_scenarios(&s);
+    assert_eq!(r.cells[0].results[0].verdict, Verdict::Tie);
+}
+
+#[test]
+fn thunder_wins_big_gap() {
+    let h = Harness { config: mini_config(CacheState::Warm, Durability::Fast) };
+    let s = vec![Scenario::new("thunder_fast", "self")
+        .setup(|t, m| build_blog_fixtures(t, m))
+        .thunder(|_f| sleep(Duration::from_millis(1)))
+        .sqlite(|_f| sleep(Duration::from_millis(20)))
+        .assert(|_f| Ok(()))
+        .build()];
+    let r = h.run_scenarios(&s);
+    assert_eq!(r.cells[0].results[0].verdict, Verdict::Win);
+}
+
+#[test]
+fn durable_is_unsupported() {
+    let h = Harness { config: mini_config(CacheState::Warm, Durability::Durable) };
+    let s = vec![Scenario::new("any", "self")
+        .setup(|t, m| build_blog_fixtures(t, m))
+        .thunder(|_f| {})
+        .sqlite(|_f| {})
+        .assert(|_f| Ok(()))
+        .build()];
+    let r = h.run_scenarios(&s);
+    assert_eq!(r.cells[0].results[0].verdict, Verdict::Unsupported);
+}
+
+#[test]
+fn thunder_panic_is_failure_not_crash() {
+    let h = Harness { config: mini_config(CacheState::Warm, Durability::Fast) };
+    let s = vec![Scenario::new("crash", "self")
+        .setup(|t, m| build_blog_fixtures(t, m))
+        .thunder(|_f| panic!("deliberate"))
+        .sqlite(|_f| {})
+        .assert(|_f| Ok(()))
+        .build()];
+    let r = h.run_scenarios(&s);
+    assert!(matches!(r.cells[0].results[0].verdict, Verdict::Failure(_)));
+}
+
+#[test]
+fn assert_mismatch_is_failure() {
+    let h = Harness { config: mini_config(CacheState::Warm, Durability::Fast) };
+    let s = vec![Scenario::new("wrong", "self")
+        .setup(|t, m| build_blog_fixtures(t, m))
+        .thunder(|_f| {})
+        .sqlite(|_f| {})
+        .assert(|_f| Err("engines disagree".into()))
+        .build()];
+    let r = h.run_scenarios(&s);
+    assert!(matches!(&r.cells[0].results[0].verdict, Verdict::Failure(m) if m == "engines disagree"));
+}
+
+#[test]
+fn cold_cache_completes_scenario() {
+    let h = Harness { config: mini_config(CacheState::Cold, Durability::Fast) };
+    let s = vec![Scenario::new("cold_end_to_end", "self")
+        .setup(|t, m| build_blog_fixtures(t, m))
+        .thunder(|_f| {})
+        .sqlite(|_f| {})
+        .assert(|_f| Ok(()))
+        .build()];
+    let r = h.run_scenarios(&s);
+    // Noisy timing for no-op closures; just ensure it completed without Failure/Unsupported.
+    assert!(!matches!(r.cells[0].results[0].verdict, Verdict::Failure(_) | Verdict::Unsupported),
+        "got {:?}", r.cells[0].results[0].verdict);
+}
