@@ -3,3 +3,6 @@
 //! See `docs/superpowers/specs/2026-04-16-benchmark-harness-design.md`.
 
 #![allow(dead_code)] // submodules fill in incrementally
+
+pub mod verdict;
+pub use verdict::{classify_ratio, Verdict};

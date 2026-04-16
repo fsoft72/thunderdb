@@ -1,3 +1,4 @@
-// Stub; real content added in Task 21.
+mod common;
+
 #[test]
 fn placeholder() {}
