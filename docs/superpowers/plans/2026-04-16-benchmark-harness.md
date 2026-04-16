@@ -45,8 +45,8 @@ thunderdb/
 │   │   │   ├── fixtures.rs               # CREATE (Tasks 9, 10)
 │   │   │   ├── scenario.rs               # CREATE (Task 11)
 │   │   │   └── runner.rs                 # CREATE (Tasks 12–18, 21)
-│   │   ├── vs_sqlite_read.rs             # CREATE (Tasks 25, 26)
-│   │   └── harness_selftest.rs           # CREATE (Tasks 23, 24)
+│   │   ├── vs_sqlite_read.rs             # CREATE (Tasks 22, 23)
+│   │   └── harness_selftest.rs           # CREATE (Task 21)
 │   └── integration/
 │       └── thunderdb_vs_sqlite_bench.rs  # DELETE (Task 30)
 └── target/perf/                          # gitignored runtime artifacts
