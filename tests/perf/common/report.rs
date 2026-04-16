@@ -164,6 +164,8 @@ impl HarnessReport {
     }
 }
 
+/// Format nanoseconds as a human-readable duration string.
+/// Thresholds: <1µs → ns, <1ms → µs, <1s → ms, else → s.
 fn format_duration_ns(ns: u128) -> String {
     if ns < 1_000 { format!("{}ns", ns) }
     else if ns < 1_000_000 { format!("{}µs", ns / 1_000) }
