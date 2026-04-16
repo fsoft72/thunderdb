@@ -9,3 +9,5 @@ pub use verdict::{classify_ratio, Verdict};
 
 pub mod fairness;
 pub use fairness::{Tier, Durability, CacheState, HarnessConfig};
+
+pub mod cache;
