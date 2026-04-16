@@ -23,3 +23,6 @@ pub use fixtures::{Fixtures, FIXTURE_SEED, USER_COUNT, TOPICS, build_blog_fixtur
 
 pub mod scenario;
 pub use scenario::{Scenario, ScenarioBuilder};
+
+pub mod runner;
+pub use runner::Harness;
