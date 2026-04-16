@@ -11,3 +11,6 @@ pub mod fairness;
 pub use fairness::{Tier, Durability, CacheState, HarnessConfig};
 
 pub mod cache;
+
+pub mod report;
+pub use report::{BenchResult, EngineTiming, HarnessReport, CellReport, Summary};
