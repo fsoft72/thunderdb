@@ -215,7 +215,7 @@ fn scenarios() -> Vec<Scenario> {
         Scenario::new("10. Full table scan (10k posts)", "read")
             .setup(|t, m| build_blog_fixtures(t, m))
             .thunder(|f| {
-                let _ = f.thunder_mut().scan_with_projection("blog_posts", vec![], None, None, Some(vec![0])).unwrap();
+                let _ = f.thunder_mut().for_each_row("blog_posts", vec![], Some(vec![0]), |_| {}).unwrap();
             })
             .sqlite(|f| {
                 let mut st = f.sqlite().prepare("SELECT id FROM blog_posts").unwrap();
@@ -256,9 +256,7 @@ fn vs_sqlite_read() {
     let baseline_path = PathBuf::from("perf/baseline.json");
     let artifact_dir = PathBuf::from("target/perf");
     let report = h.run(&scenarios(), &baseline_path, &artifact_dir);
-    // Parent-goal assertion — tightened as SP2 closes gaps.
-    // SP1 acceptance: no Failures. Known Losses (full scan, IN) are tracked and
-    // become Wins/Ties in SP2.
+    // Parent-goal assertion (SP2 and beyond).
     assert!(report.summary.failure == 0, "read scenarios have {} failure(s)", report.summary.failure);
-    eprintln!("SP1 acceptance: known Losses remaining = {}; SP2 closes them.", report.summary.loss);
+    assert!(report.summary.loss == 0, "read scenarios have {} loss(es)", report.summary.loss);
 }
