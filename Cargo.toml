@@ -21,6 +21,9 @@ crate-type = ["rlib", "cdylib"]
 criterion = "0.5"
 rusqlite = { version = "0.34", features = ["bundled"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [dependencies.rustyline]
 version = "13.0"
 optional = true
@@ -89,3 +92,11 @@ path = "tests/integration/thunderdb_vs_sqlite_bench.rs"
 [[bench]]
 name = "stress_bench"
 harness = false
+
+[[test]]
+name = "vs_sqlite_read"
+path = "tests/perf/vs_sqlite_read.rs"
+
+[[test]]
+name = "harness_selftest"
+path = "tests/perf/harness_selftest.rs"
