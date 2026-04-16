@@ -164,6 +164,27 @@ impl HarnessReport {
     }
 }
 
+impl HarnessReport {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap()
+    }
+
+    pub fn write_to(&self, dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        std::fs::create_dir_all(dir)?;
+        let fname = format!("{}.json", self.started_at.replace(":", "-"));
+        let path = dir.join(fname);
+        std::fs::write(&path, self.to_json())?;
+        Ok(path)
+    }
+
+    /// Print scoreboard to stdout and exit with 0 (pass) or 1 (any Loss or Failure).
+    pub fn exit_with_verdict(self) -> ! {
+        println!("{}", self.to_terminal());
+        let code = if self.summary.loss > 0 || self.summary.failure > 0 { 1 } else { 0 };
+        std::process::exit(code);
+    }
+}
+
 /// Format nanoseconds as a human-readable duration string.
 /// Thresholds: <1µs → ns, <1ms → µs, <1s → ms, else → s.
 fn format_duration_ns(ns: u128) -> String {
@@ -244,5 +265,16 @@ mod tests {
         assert_eq!(format_duration_ns(500), "500ns");
         assert_eq!(format_duration_ns(1_500), "1µs");
         assert_eq!(format_duration_ns(2_500_000), "2ms");
+    }
+
+    #[test]
+    fn write_to_creates_file() {
+        let dir = std::env::temp_dir().join("thunderdb_write_to_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = sample_report().write_to(&dir).unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"scenario\": \"test\""));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
