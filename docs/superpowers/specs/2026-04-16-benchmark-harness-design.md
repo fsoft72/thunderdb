@@ -93,9 +93,10 @@ thunderdb/
 │   │   └── harness_selftest.rs       (NEW — harness self-tests)
 │   └── integration/
 │       └── thunderdb_vs_sqlite_bench.rs  (DELETED at end of SP1)
-└── target/perf/                      (gitignored; runtime only)
-    ├── <ISO-timestamp>.json
-    └── baseline.json                 (committed to repo)
+├── perf/
+│   └── baseline.json                 (committed baseline)
+└── target/perf/                      (gitignored runtime artifacts)
+    └── <ISO-timestamp>.json
 ```
 
 `tests/perf/common/` is included as `mod common;` from each test file. This is the standard Rust integration-test shared-code pattern. No new crate.
@@ -437,7 +438,7 @@ Path: `target/perf/<ISO-timestamp>.json`.
 
 ### 6.7 Baseline
 
-File: `target/perf/baseline.json` (committed to repo).
+File: `perf/baseline.json` (committed to repo). Runtime artifacts stay under `target/perf/`.
 
 Format is the same JSON schema as a run artifact. Comparison is per `(scenario, tier, mode, cache)` key. Entries missing from baseline print `new`; entries missing from current run print `removed`.
 

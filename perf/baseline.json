@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "git_sha": "364b01386daa62d26e500dcb696045e546237b04",
+  "rustc_version": "rustc 1.91.0 (f8297e351 2025-10-28)",
+  "started_at": "unix:1776371058",
+  "cells": [
+    {
+      "tier": "SMALL",
+      "mode": "FAST",
+      "cache": "WARM",
+      "results": [
+        {
+          "scenario": "1. COUNT(*) all three tables",
+          "group": "read",
+          "thunder": {
+            "median_ns": 92,
+            "p95_ns": 152,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 7874,
+            "p95_ns": 9051,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.011684023368046735,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "2. LIKE prefix on title (2000 hits)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 192795,
+            "p95_ns": 199655,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 376545,
+            "p95_ns": 402136,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.5120105166713141,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "3. LIKE prefix on content (1 hit)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 314066,
+            "p95_ns": 337901,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 358833,
+            "p95_ns": 376369,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.8752428009686958,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "4. Indexed EQ: posts by author_id=1",
+          "group": "read",
+          "thunder": {
+            "median_ns": 5215,
+            "p95_ns": 9699,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 28484,
+            "p95_ns": 30604,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.1830852408369611,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "5. Post + comments (indexed)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 1347,
+            "p95_ns": 1629,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 4068,
+            "p95_ns": 4513,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.33112094395280234,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "6. 3-table join (post+comments+users)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 2917,
+            "p95_ns": 3711,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 7042,
+            "p95_ns": 7762,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.4142289122408407,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "7. Recent 20 posts + comment counts",
+          "group": "read",
+          "thunder": {
+            "median_ns": 10745,
+            "p95_ns": 11368,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 10834,
+            "p95_ns": 11356,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.991785120915636,
+          "verdict": "Tie"
+        },
+        {
+          "scenario": "8. IN (1, 3) on author_id",
+          "group": "read",
+          "thunder": {
+            "median_ns": 39867,
+            "p95_ns": 41483,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 58128,
+            "p95_ns": 62941,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.6858484723369116,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "9. BETWEEN 5000..5100 on id (indexed)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 1843,
+            "p95_ns": 2053,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 3859,
+            "p95_ns": 4241,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.47758486654573723,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "10. Full table scan (10k posts)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 627742,
+            "p95_ns": 636173,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 301174,
+            "p95_ns": 305621,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 2.0843167072854896,
+          "verdict": "Loss"
+        },
+        {
+          "scenario": "11. COUNT WHERE author_id=2 (indexed)",
+          "group": "read",
+          "thunder": {
+            "median_ns": 18079,
+            "p95_ns": 25150,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 83633,
+            "p95_ns": 87221,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.21617065034137242,
+          "verdict": "Win"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "win": 9,
+    "tie": 1,
+    "loss": 1,
+    "unsupported": 0,
+    "failure": 0
+  }
+}
