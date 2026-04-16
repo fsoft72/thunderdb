@@ -17,3 +17,6 @@ pub use report::{BenchResult, EngineTiming, HarnessReport, CellReport, Summary};
 
 pub mod baseline;
 pub use baseline::{load_baseline, save_baseline, index_baseline, delta_pct, BaselineKey};
+
+pub mod fixtures;
+pub use fixtures::{Fixtures, FIXTURE_SEED};
