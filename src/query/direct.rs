@@ -119,6 +119,29 @@ pub trait DirectDataAccess {
     /// # Returns
     /// Number of matching rows
     fn count(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize>;
+
+    /// Stream rows through a callback. Zero per-row heap allocations
+    /// when projected values are inline-sized — the callback's `&[Value]`
+    /// slice lives in a reused buffer.
+    ///
+    /// The slice is valid only during the callback invocation; clone
+    /// values you need to retain.
+    ///
+    /// # Arguments
+    /// * `table`      - Table name
+    /// * `filters`    - WHERE conditions (AND-combined); `vec![]` for full scan
+    /// * `projection` - Column indices to materialize; `None` = all columns
+    /// * `callback`   - Invoked once per matching row
+    ///
+    /// # Returns
+    /// Number of rows processed.
+    fn for_each_row<F: FnMut(&[Value])>(
+        &mut self,
+        table: &str,
+        filters: Vec<Filter>,
+        projection: Option<Vec<usize>>,
+        callback: F,
+    ) -> Result<usize>;
 }
 
 /// Query execution context
