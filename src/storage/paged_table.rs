@@ -257,6 +257,53 @@ impl PagedTable {
         Ok(rows)
     }
 
+    /// Stream all active rows through a callback with projected columns.
+    ///
+    /// Uses a reused buffer — zero heap allocations per row when projected
+    /// values are inline-sized. The callback's slice is valid only during
+    /// the invocation.
+    ///
+    /// Returns the number of rows passed to the callback.
+    pub fn for_each_row_projected<F: FnMut(&[Value])>(
+        &mut self,
+        columns: &[usize],
+        mut callback: F,
+    ) -> Result<usize> {
+        let mmap_ptr = self.page_file.ensure_mmap_and_ptr()?;
+        let page_count = self.page_file.page_count();
+        let mut buf: Vec<Value> = Vec::with_capacity(columns.len());
+        let mut count = 0usize;
+
+        for page_id in 1..page_count {
+            let pd = _mmap_page(mmap_ptr, page_id);
+            if pd[4] != PageType::Data as u8 { continue; }
+
+            let slot_count = u16::from_le_bytes(pd[6..8].try_into().unwrap());
+            for slot in 0..slot_count {
+                let raw = match _slot_bytes(pd, slot) {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                buf.clear();
+                if _has_toast(raw) {
+                    let raw_owned = raw.to_vec();
+                    let detoasted = toast::detoast_row_bytes(&raw_owned, &mut self.page_file)?;
+                    for &col in columns {
+                        buf.push(value_at_page_bytes(&detoasted, col)?);
+                    }
+                } else {
+                    for &col in columns {
+                        buf.push(value_at_page_bytes(raw, col)?);
+                    }
+                }
+                callback(&buf);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Scan rows that pass a raw-bytes predicate.
     ///
     /// The predicate receives the raw (possibly toasted) slot bytes.
@@ -890,5 +937,59 @@ mod tests {
         }
 
         cleanup(&path);
+    }
+
+    #[test]
+    fn for_each_row_projected_visits_all_rows() {
+        let dir = std::env::temp_dir().join("thunderdb_for_each_test_basic");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pages.bin");
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        // Insert 5 rows with Int32 id + Varchar name
+        for i in 0..5i32 {
+            pt.insert_row(&[Value::Int32(i), Value::varchar(format!("user_{}", i))]).unwrap();
+        }
+
+        // Project column 0 only (id)
+        let mut seen: Vec<i32> = Vec::new();
+        let count = pt.for_each_row_projected(&[0], |vals| {
+            assert_eq!(vals.len(), 1);
+            if let Value::Int32(n) = vals[0] { seen.push(n); }
+        }).unwrap();
+
+        assert_eq!(count, 5);
+        seen.sort();
+        assert_eq!(seen, vec![0, 1, 2, 3, 4]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn for_each_row_projected_with_toasted_rows() {
+        let dir = std::env::temp_dir().join("thunderdb_for_each_test_toast");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pages.bin");
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        // Insert one small and one large (TOAST-triggering) row
+        let large = "x".repeat(3000); // > TOAST_THRESHOLD (2000)
+        pt.insert_row(&[Value::Int32(1), Value::varchar("small")]).unwrap();
+        pt.insert_row(&[Value::Int32(2), Value::varchar(large.clone())]).unwrap();
+
+        let mut seen: Vec<(i32, String)> = Vec::new();
+        pt.for_each_row_projected(&[0, 1], |vals| {
+            let id = if let Value::Int32(n) = vals[0] { n } else { panic!() };
+            let s = if let Value::Varchar(s) = &vals[1] { s.as_str().to_string() } else { panic!() };
+            seen.push((id, s));
+        }).unwrap();
+
+        seen.sort_by_key(|(id, _)| *id);
+        assert_eq!(seen[0], (1, "small".to_string()));
+        assert_eq!(seen[1], (2, large));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

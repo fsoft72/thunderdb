@@ -408,6 +408,16 @@ impl TableEngine {
         self.paged_table.count_filtered(predicate)
     }
 
+    /// Stream active rows through a callback with projected columns.
+    /// Thin pass-through to `PagedTable::for_each_row_projected`.
+    pub fn for_each_row_projected<F: FnMut(&[Value])>(
+        &mut self,
+        columns: &[usize],
+        callback: F,
+    ) -> Result<usize> {
+        self.paged_table.for_each_row_projected(columns, callback)
+    }
+
     /// Get mutable access to the underlying paged table.
     pub fn paged_table_mut(&mut self) -> &mut PagedTable {
         &mut self.paged_table
@@ -786,5 +796,21 @@ mod tests {
         let stats = table.stats();
         assert_eq!(stats.name, "test_stats");
         assert_eq!(stats.active_rows, 9);
+    }
+
+    #[test]
+    fn for_each_row_projected_delegates_to_paged_table() {
+        let mut table = create_test_table("for_each_delegate");
+        table.insert_row(vec![Value::Int32(1), Value::varchar("a"), Value::Int32(10)]).unwrap();
+        table.insert_row(vec![Value::Int32(2), Value::varchar("b"), Value::Int32(20)]).unwrap();
+
+        let mut ids: Vec<i32> = Vec::new();
+        let count = table.for_each_row_projected(&[0], |vals| {
+            if let Value::Int32(n) = vals[0] { ids.push(n); }
+        }).unwrap();
+
+        assert_eq!(count, 2);
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]);
     }
 }

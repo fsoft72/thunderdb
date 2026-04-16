@@ -95,3 +95,24 @@ fn cold_cache_completes_scenario() {
     assert!(!matches!(r.cells[0].results[0].verdict, Verdict::Failure(_) | Verdict::Unsupported),
         "got {:?}", r.cells[0].results[0].verdict);
 }
+
+#[test]
+#[cfg(unix)]
+fn cold_fadvises_sqlite_wal_companions() {
+    // FAST mode uses WAL → sqlite.db-wal companion file is created during
+    // the inserts. Verify reopen_handles reaches fadvise on it without error.
+    let mut f = build_blog_fixtures(Tier::Small, Durability::Fast);
+
+    let wal_path = {
+        let mut s = f.sqlite_path.clone().into_os_string();
+        s.push("-wal");
+        std::path::PathBuf::from(s)
+    };
+    assert!(wal_path.exists(),
+        "FAST mode should have created the WAL file {}", wal_path.display());
+
+    // Call the reopen path — must not error.
+    common::fixtures::reopen_handles(&mut f).expect("reopen should succeed");
+
+    drop_fixtures(f);
+}
