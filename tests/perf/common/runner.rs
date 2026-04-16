@@ -84,10 +84,19 @@ impl Harness {
             let _ = std::panic::catch_unwind(AssertUnwindSafe(|| (scenario.sqlite)(&fixtures)));
         }
 
-        // Sample Thunder
+        // Sample Thunder (reopen between samples if COLD)
         let samples = self.config.sample_count;
         let thunder_panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            Harness::collect_samples(samples, || (scenario.thunder)(&mut fixtures))
+            let mut timings = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                if cache == CacheState::Cold {
+                    let _ = crate::common::fixtures::reopen_handles(&mut fixtures);
+                }
+                let t0 = Instant::now();
+                (scenario.thunder)(&mut fixtures);
+                timings.push(t0.elapsed().as_nanos());
+            }
+            Harness::reduce(timings)
         }));
         let thunder = match thunder_panic {
             Ok((median, p95, out)) => Some(EngineTiming {
@@ -96,9 +105,18 @@ impl Harness {
             Err(_) => None,
         };
 
-        // Sample SQLite
+        // Sample SQLite (reopen between samples if COLD)
         let sqlite_panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            Harness::collect_samples(samples, || (scenario.sqlite)(&fixtures))
+            let mut timings = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                if cache == CacheState::Cold {
+                    let _ = crate::common::fixtures::reopen_handles(&mut fixtures);
+                }
+                let t0 = Instant::now();
+                (scenario.sqlite)(&fixtures);
+                timings.push(t0.elapsed().as_nanos());
+            }
+            Harness::reduce(timings)
         }));
         let sqlite = match sqlite_panic {
             Ok((median, p95, out)) => Some(EngineTiming {
@@ -125,7 +143,6 @@ impl Harness {
             .map(|(t, s)| t.median_ns as f64 / s.median_ns as f64);
 
         drop_fixtures(fixtures);
-        let _ = cache;  // COLD wiring added in Task 16
 
         BenchResult {
             scenario: scenario.name.into(), group: scenario.group.into(),
@@ -294,6 +311,30 @@ mod tests {
             .build();
         let r = h.run_one(&s, Tier::Small, Durability::Durable, CacheState::Warm);
         assert_eq!(r.verdict, Verdict::Unsupported);
+    }
+
+    #[test]
+    fn cold_cache_reopens_between_samples() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small], durabilities: vec![Durability::Fast],
+            cache_states: vec![CacheState::Cold], sample_count: 3, update_baseline: false,
+        }};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::clone(&calls);
+        let s = Scenario::new("cold_probe", "test")
+            .setup(|t, m| build_blog_fixtures(t, m))
+            .thunder(move |_f| { calls2.fetch_add(1, Ordering::SeqCst); })
+            .sqlite(|_f| {})
+            .assert(|_f| Ok(()))
+            .build();
+        let r = h.run_one(&s, Tier::Small, Durability::Fast, CacheState::Cold);
+        // 3 warmup + 3 sample calls to thunder = 6
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert!(!matches!(r.verdict, Verdict::Failure(_) | Verdict::Unsupported),
+            "unexpected verdict {:?}", r.verdict);
     }
 
     #[test]

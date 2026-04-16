@@ -234,6 +234,22 @@ pub fn build_blog_fixtures(tier: Tier, mode: Durability) -> Fixtures {
     make_fixtures(tier, mode, thunder_dir, sqlite_path, tdb, sdb)
 }
 
+/// Close and reopen both engine handles. Used between COLD samples.
+pub(crate) fn reopen_handles(f: &mut Fixtures) -> std::io::Result<()> {
+    let (_t, _s) = f.take_handles();
+    drop(_t);
+    drop(_s);
+    // posix_fadvise on Thunder's data files + SQLite file
+    for p in crate::common::cache::collect_data_files(&f.thunder_dir) {
+        let _ = crate::common::cache::posix_fadvise_dontneed(&p);
+    }
+    let _ = crate::common::cache::posix_fadvise_dontneed(&f.sqlite_path);
+    let t = Database::open(&f.thunder_dir).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+    let s = Connection::open(&f.sqlite_path).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+    f.set_handles(t, s);
+    Ok(())
+}
+
 /// Clean up tmp directories created by `build_blog_fixtures` (best-effort).
 ///
 /// Clones paths before dropping the struct so handles are closed first
