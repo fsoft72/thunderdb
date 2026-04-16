@@ -179,6 +179,27 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// End-to-end: run all scenarios, load baseline if present, print scoreboard,
+    /// optionally promote baseline, write JSON artifact, return report.
+    pub fn run(&self, scenarios: &[Scenario], baseline_path: &std::path::Path, artifact_dir: &std::path::Path) -> HarnessReport {
+        let report = self.run_scenarios(scenarios);
+        let baseline = crate::common::baseline::load_baseline(baseline_path).ok().flatten();
+        let idx = baseline.as_ref().map(|b| crate::common::baseline::index_baseline(b));
+        println!("{}", report.to_terminal_with_baseline(idx.as_ref()));
+        let _ = report.write_to(artifact_dir);
+        if self.config.update_baseline {
+            if report.summary.failure > 0 {
+                eprintln!("--update-baseline refused: run contains Failures");
+            } else {
+                crate::common::baseline::save_baseline(&report, baseline_path).expect("save baseline");
+                eprintln!("Baseline promoted: {}", baseline_path.display());
+            }
+        }
+        report
+    }
+}
+
 /// Retrieve the current git commit SHA via a subprocess call.
 fn collect_git_sha() -> String {
     std::process::Command::new("git").args(["rev-parse", "HEAD"]).output()
@@ -354,5 +375,28 @@ mod tests {
         assert_eq!(r.cells.len(), 2);
         assert_eq!(r.cells[0].results.len(), 1);
         assert_eq!(r.summary.unsupported, 1);
+    }
+
+    #[test]
+    fn run_end_to_end_writes_artifact() {
+        let dir = std::env::temp_dir().join("thunderdb_run_e2e_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let baseline_path = dir.join("baseline.json");
+        let artifact_dir = dir.join("artifacts");
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small], durabilities: vec![Durability::Fast],
+            cache_states: vec![CacheState::Warm], sample_count: 3, update_baseline: false,
+        }};
+        let s = vec![
+            Scenario::new("e2e", "read")
+                .setup(|t, m| build_blog_fixtures(t, m))
+                .thunder(|_f| {}).sqlite(|_f| {}).assert(|_f| Ok(())).build(),
+        ];
+        let report = h.run(&s, &baseline_path, &artifact_dir);
+        assert_eq!(report.cells.len(), 1);
+        let entries: Vec<_> = std::fs::read_dir(&artifact_dir).unwrap()
+            .filter_map(|e| e.ok()).collect();
+        assert_eq!(entries.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
