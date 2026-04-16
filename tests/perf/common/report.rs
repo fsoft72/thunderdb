@@ -125,20 +125,34 @@ impl HarnessReport {
     /// Render a human-readable scoreboard. Stable format: header, per-cell
     /// table, aggregate footer.
     pub fn to_terminal(&self) -> String {
+        self.to_terminal_with_baseline(None)
+    }
+
+    pub fn to_terminal_with_baseline(
+        &self,
+        baseline: Option<&std::collections::HashMap<crate::common::baseline::BaselineKey, u128>>,
+    ) -> String {
         use std::fmt::Write;
         let mut out = String::new();
 
         for cell in &self.cells {
             writeln!(&mut out, "\n=== vs SQLite: (tier={}, mode={}, cache={}) ===\n",
                 cell.tier.label(), cell.mode.label(), cell.cache.label()).unwrap();
-            writeln!(&mut out, " {:<40} {:>10} {:>10} {:>8}   {}",
-                "Scenario", "Thunder", "SQLite", "Ratio", "Verdict").unwrap();
-            writeln!(&mut out, " {}", "-".repeat(80)).unwrap();
+            writeln!(&mut out, " {:<40} {:>10} {:>10} {:>8} {:>8}   {}",
+                "Scenario", "Thunder", "SQLite", "Ratio", "vs Base", "Verdict").unwrap();
+            writeln!(&mut out, " {}", "-".repeat(90)).unwrap();
             let mut w = 0; let mut t = 0; let mut l = 0; let mut u = 0; let mut f = 0;
             for r in &cell.results {
                 let thunder = r.thunder.as_ref().map(|t| format_duration_ns(t.median_ns)).unwrap_or_else(|| "n/a".into());
                 let sqlite = r.sqlite.as_ref().map(|s| format_duration_ns(s.median_ns)).unwrap_or_else(|| "n/a".into());
                 let ratio = r.ratio.map(|x| format!("{:.2}x", x)).unwrap_or_else(|| "—".into());
+                let vs_base = if let (Some(t), Some(idx)) = (&r.thunder, baseline) {
+                    let key = (r.scenario.clone(), cell.tier.label().into(), cell.mode.label().into(), cell.cache.label().into());
+                    match crate::common::baseline::delta_pct(idx, &key, t.median_ns) {
+                        Some(d) => format!("{:+.0}%", d),
+                        None => "new".into(),
+                    }
+                } else { "—".into() };
                 let verdict = match &r.verdict {
                     Verdict::Win => { w += 1; "Win".to_string() }
                     Verdict::Tie => { t += 1; "Tie".to_string() }
@@ -146,10 +160,10 @@ impl HarnessReport {
                     Verdict::Unsupported => { u += 1; "Unsupported".to_string() }
                     Verdict::Failure(msg) => { f += 1; format!("Failure: {}", msg) }
                 };
-                writeln!(&mut out, " {:<40} {:>10} {:>10} {:>8}   {}",
-                    r.scenario, thunder, sqlite, ratio, verdict).unwrap();
+                writeln!(&mut out, " {:<40} {:>10} {:>10} {:>8} {:>8}   {}",
+                    r.scenario, thunder, sqlite, ratio, vs_base, verdict).unwrap();
             }
-            writeln!(&mut out, " {}", "-".repeat(80)).unwrap();
+            writeln!(&mut out, " {}", "-".repeat(90)).unwrap();
             writeln!(&mut out, " Summary: {} Win, {} Tie, {} Loss, {} Unsupported, {} Failure",
                 w, t, l, u, f).unwrap();
         }
@@ -276,5 +290,24 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"scenario\": \"test\""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_with_baseline_shows_delta() {
+        use crate::common::baseline::index_baseline;
+        let baseline = sample_report();
+        let mut current = sample_report();
+        current.cells[0].results[0].thunder.as_mut().unwrap().median_ns = 110;
+        let idx = index_baseline(&baseline);
+        let out = current.to_terminal_with_baseline(Some(&idx));
+        assert!(out.contains("+10%"), "expected +10% in output, got:\n{}", out);
+    }
+
+    #[test]
+    fn terminal_without_baseline_omits_delta() {
+        let r = sample_report();
+        let out = r.to_terminal_with_baseline(None);
+        assert!(!out.contains("+0%"), "should not show +0% without baseline");
+        assert!(out.contains("—"), "should show em-dash placeholder");
     }
 }
