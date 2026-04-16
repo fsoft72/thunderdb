@@ -1,5 +1,19 @@
 # ThunderDB Changes
 
+## 2026-04-16 - SP2: Full-scan closure & COLD fairness fix
+
+Second sub-project in the "faster than SQLite in all benchmarks" program.
+
+- **Streaming scan API**: new `DirectDataAccess::for_each_row` callback-driven method on `Database`. Zero per-row heap allocations on the hot no-filter path — `PagedTable::for_each_row_projected` reuses a single `Vec<Value>` buffer across all slots. Filter path wraps `scan_with_projection` for API completeness.
+- **Full-scan benchmark migrated**: scenario 10 (Full table scan 10k posts) now uses `for_each_row`. Closes the last FAST/WARM Loss remaining from SP1. Ratio improved from 2.04x Loss to 0.67x Win — a 3x speedup, Thunder now 33% faster than SQLite on this path.
+- **Scoreboard at SMALL/FAST/WARM**: 10 Win, 1 Tie, 0 Loss, 0 Failure. Hard `report.summary.loss == 0` assertion restored in `vs_sqlite_read`.
+- **COLD fairness fix**: `reopen_handles` now fadvises SQLite's `-wal` and `-shm` companion files (when they exist) alongside the main `.db`. Previously SQLite retained its WAL in the OS cache across "COLD" samples, giving it an unfair advantage. COLD measurements are now apples-to-apples.
+- **Honest COLD findings**: after fairness fix, COLD measurements still show 9 of 11 scenarios losing to SQLite (up to 156x on scenario 7). The streaming API narrows scenario 10 to a Win even in COLD mode. Remaining COLD regressions are genuine Thunder weakness (eager index load on open, mmap faults on reopen) — documented for a future cold-start optimization sub-project.
+- **New baseline committed** to `perf/baseline.json` (SMALL/FAST/WARM).
+
+Spec: `docs/superpowers/specs/2026-04-16-sp2-full-scan-closure-design.md`
+Plan: `docs/superpowers/plans/2026-04-16-sp2-full-scan-closure.md`
+
 ## 2026-04-16 - Benchmark harness & fairness protocol (SP1 of 7)
 
 Foundation for the "faster than SQLite in all benchmarks" program.
