@@ -747,6 +747,65 @@ impl DirectDataAccess for Database {
             true
         })
     }
+
+    /// Stream rows through a callback, projecting to the requested columns.
+    ///
+    /// # Hot path (no filters)
+    /// Delegates directly to `TableEngine::for_each_row_projected` — zero
+    /// per-row heap allocations for inline-sized values.
+    ///
+    /// # Filter path
+    /// Wraps `scan_with_projection` as a correctness-preserving fallback.
+    /// Streaming filter optimisation is deferred (spec §3.5 Plan B).
+    ///
+    /// # Arguments
+    /// * `table`      - Table name
+    /// * `filters`    - Row predicates; empty = no filter (hot path)
+    /// * `projection` - Column indices to materialise; `None` = all columns
+    ///                  (requires schema to be set on the table)
+    /// * `callback`   - Called once per matching row with a slice of values
+    ///
+    /// # Returns
+    /// Number of rows passed to the callback.
+    fn for_each_row<F: FnMut(&[Value])>(
+        &mut self,
+        table: &str,
+        filters: Vec<Filter>,
+        projection: Option<Vec<usize>>,
+        mut callback: F,
+    ) -> Result<usize> {
+        // Resolve projection (explicit, or all-columns from schema).
+        // The borrow of `table_engine` is dropped at the end of this block.
+        let cols: Vec<usize> = {
+            let table_engine = self.get_table_mut(table)?;
+            match projection {
+                Some(c) => c,
+                None => {
+                    let schema = table_engine.schema().ok_or_else(|| {
+                        Error::InvalidOperation(
+                            "for_each_row with projection=None requires table schema to be set".into()
+                        )
+                    })?;
+                    (0..schema.columns.len()).collect()
+                }
+            }
+        };
+
+        // Hot path: no filters → direct streaming scan (zero per-row allocs)
+        if filters.is_empty() {
+            let table_engine = self.get_table_mut(table)?;
+            return table_engine.for_each_row_projected(&cols, callback);
+        }
+
+        // Filter path: wrap scan_with_projection as fallback. Correctness
+        // first; streaming filter optimisation is deferred (spec §3.5 Plan B).
+        let rows = self.scan_with_projection(table, filters, None, None, Some(cols))?;
+        let n = rows.len();
+        for row in rows {
+            callback(&row.values);
+        }
+        Ok(n)
+    }
 }
 
 /// Apply offset and limit to a pre-filtered result set.
@@ -785,5 +844,90 @@ mod tests {
         assert_eq!(db.config().storage.data_dir, temp_dir);
 
         std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn for_each_row_streams_no_filter() {
+        use crate::storage::table_engine::{ColumnInfo, TableSchema};
+
+        let dir = std::env::temp_dir().join("thunderdb_db_for_each_nofilter");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut db = Database::open(&dir).unwrap();
+
+        db.insert_batch("t", vec![
+            vec![Value::Int32(1), Value::varchar("alice".to_string())],
+            vec![Value::Int32(2), Value::varchar("bob".to_string())],
+            vec![Value::Int32(3), Value::varchar("charlie".to_string())],
+        ]).unwrap();
+        {
+            let tbl = db.get_table_mut("t").unwrap();
+            tbl.set_schema(TableSchema { columns: vec![
+                ColumnInfo { name: "id".into(), data_type: "INT32".into() },
+                ColumnInfo { name: "name".into(), data_type: "VARCHAR".into() },
+            ]}).unwrap();
+        }
+
+        let mut ids: Vec<i32> = Vec::new();
+        let count = db.for_each_row("t", vec![], Some(vec![0]), |vals| {
+            if let Value::Int32(n) = vals[0] { ids.push(n); }
+        }).unwrap();
+
+        assert_eq!(count, 3);
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn for_each_row_with_filter_uses_fallback() {
+        use crate::storage::table_engine::{ColumnInfo, TableSchema};
+        use crate::query::{Filter, Operator};
+
+        let dir = std::env::temp_dir().join("thunderdb_db_for_each_filter");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut db = Database::open(&dir).unwrap();
+
+        db.insert_batch("t", vec![
+            vec![Value::Int32(1), Value::varchar("a".to_string())],
+            vec![Value::Int32(2), Value::varchar("b".to_string())],
+            vec![Value::Int32(3), Value::varchar("c".to_string())],
+        ]).unwrap();
+        {
+            let tbl = db.get_table_mut("t").unwrap();
+            tbl.set_schema(TableSchema { columns: vec![
+                ColumnInfo { name: "id".into(), data_type: "INT32".into() },
+                ColumnInfo { name: "name".into(), data_type: "VARCHAR".into() },
+            ]}).unwrap();
+        }
+
+        let mut matched: Vec<i32> = Vec::new();
+        let count = db.for_each_row(
+            "t",
+            vec![Filter::new("id", Operator::GreaterThan(Value::Int32(1)))],
+            Some(vec![0]),
+            |vals| {
+                if let Value::Int32(n) = vals[0] { matched.push(n); }
+            },
+        ).unwrap();
+
+        assert_eq!(count, 2);
+        matched.sort();
+        assert_eq!(matched, vec![2, 3]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn for_each_row_projection_none_requires_schema() {
+        let dir = std::env::temp_dir().join("thunderdb_db_for_each_noschema");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut db = Database::open(&dir).unwrap();
+        db.insert_batch("t", vec![vec![Value::Int32(1)]]).unwrap();
+
+        let r = db.for_each_row("t", vec![], None, |_| {});
+        assert!(matches!(r, Err(Error::InvalidOperation(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
