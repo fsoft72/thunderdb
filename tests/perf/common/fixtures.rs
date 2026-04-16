@@ -239,11 +239,26 @@ pub(crate) fn reopen_handles(f: &mut Fixtures) -> std::io::Result<()> {
     let (_t, _s) = f.take_handles();
     drop(_t);
     drop(_s);
-    // posix_fadvise on Thunder's data files + SQLite file
+
+    // Thunder: all *.bin data files.
     for p in crate::common::cache::collect_data_files(&f.thunder_dir) {
         let _ = crate::common::cache::posix_fadvise_dontneed(&p);
     }
+
+    // SQLite: main db + WAL/SHM companions (fair COLD measurement).
+    // Missing files (non-WAL journal mode, DELETE mode post-commit) skip silently.
     let _ = crate::common::cache::posix_fadvise_dontneed(&f.sqlite_path);
+    for suffix in &["-wal", "-shm"] {
+        let companion = {
+            let mut s = f.sqlite_path.clone().into_os_string();
+            s.push(suffix);
+            std::path::PathBuf::from(s)
+        };
+        if companion.exists() {
+            let _ = crate::common::cache::posix_fadvise_dontneed(&companion);
+        }
+    }
+
     let t = Database::open(&f.thunder_dir).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
     let s = Connection::open(&f.sqlite_path).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
     f.set_handles(t, s);
