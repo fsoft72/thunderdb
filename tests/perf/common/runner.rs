@@ -134,6 +134,57 @@ impl Harness {
     }
 }
 
+impl Harness {
+    /// Run all scenarios across the full (tier × mode × cache) matrix and return a HarnessReport.
+    pub fn run_scenarios(&self, scenarios: &[Scenario]) -> HarnessReport {
+        let mut cells = Vec::new();
+        for tier in &self.config.tiers {
+            for mode in &self.config.durabilities {
+                for cache in &self.config.cache_states {
+                    let mut results = Vec::new();
+                    for s in scenarios {
+                        results.push(self.run_one(s, *tier, *mode, *cache));
+                    }
+                    cells.push(CellReport { tier: *tier, mode: *mode, cache: *cache, results });
+                }
+            }
+        }
+        let mut report = HarnessReport {
+            schema_version: 1,
+            git_sha: collect_git_sha(),
+            rustc_version: collect_rustc_version(),
+            started_at: chrono_like_timestamp(),
+            cells,
+            summary: Summary { win: 0, tie: 0, loss: 0, unsupported: 0, failure: 0 },
+        };
+        report.compute_summary();
+        report
+    }
+}
+
+/// Retrieve the current git commit SHA via a subprocess call.
+fn collect_git_sha() -> String {
+    std::process::Command::new("git").args(["rev-parse", "HEAD"]).output()
+        .ok().and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Retrieve the rustc version string via a subprocess call.
+fn collect_rustc_version() -> String {
+    std::process::Command::new("rustc").arg("--version").output()
+        .ok().and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Return a unix-epoch-based timestamp string (no chrono dependency needed).
+fn chrono_like_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    format!("unix:{}", secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +294,24 @@ mod tests {
             .build();
         let r = h.run_one(&s, Tier::Small, Durability::Durable, CacheState::Warm);
         assert_eq!(r.verdict, Verdict::Unsupported);
+    }
+
+    #[test]
+    fn run_scenarios_iterates_matrix() {
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small],
+            durabilities: vec![Durability::Fast, Durability::Durable],
+            cache_states: vec![CacheState::Warm],
+            sample_count: 3, update_baseline: false,
+        }};
+        let s = vec![
+            Scenario::new("a", "read")
+                .setup(|t, m| build_blog_fixtures(t, m))
+                .thunder(|_f| {}).sqlite(|_f| {}).assert(|_f| Ok(())).build(),
+        ];
+        let r = h.run_scenarios(&s);
+        assert_eq!(r.cells.len(), 2);
+        assert_eq!(r.cells[0].results.len(), 1);
+        assert_eq!(r.summary.unsupported, 1);
     }
 }
