@@ -20,3 +20,6 @@ pub use baseline::{load_baseline, save_baseline, index_baseline, delta_pct, Base
 
 pub mod fixtures;
 pub use fixtures::{Fixtures, FIXTURE_SEED, USER_COUNT, TOPICS, build_blog_fixtures, drop_fixtures, comments_for_post, total_comments};
+
+pub mod scenario;
+pub use scenario::{Scenario, ScenarioBuilder};
