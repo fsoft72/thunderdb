@@ -274,6 +274,40 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+        // W7. DELETE every row by primary key, single txn
+        Scenario::new("W7. DELETE 10k by PK", "write")
+            .setup(|t, m| { let mut f = build_blog_fixtures(t, m); f.snapshot_all().unwrap(); f })
+            .reset(|f| f.restore_all().map_err(|e| format!("restore: {}", e)))
+            .thunder(|f| {
+                let db = f.thunder_mut();
+                let n = db.count("blog_posts", vec![]).unwrap() as i32;
+                for i in 1..=n {
+                    db.delete("blog_posts", vec![Filter::new("id", Operator::Equals(Value::Int32(i)))]).unwrap();
+                }
+            })
+            .sqlite(|f| {
+                let tx = f.sqlite().unchecked_transaction().unwrap();
+                {
+                    let mut st = tx.prepare("DELETE FROM blog_posts WHERE id = ?1").unwrap();
+                    let n: i64 = tx.query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                    for i in 1..=n as i32 { st.execute(params![i]).unwrap(); }
+                }
+                tx.commit().unwrap();
+            })
+            .assert(|f| {
+                // Re-apply Thunder delete so both engines are in the same state.
+                let db = f.thunder_mut();
+                let n = db.count("blog_posts", vec![]).unwrap() as i32;
+                for i in 1..=n {
+                    db.delete("blog_posts", vec![Filter::new("id", Operator::Equals(Value::Int32(i)))]).unwrap();
+                }
+                let t = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+                let s: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                if t != 0 || s != 0 {
+                    Err(format!("W7 not empty: thunder={}, sqlite={}", t, s))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
