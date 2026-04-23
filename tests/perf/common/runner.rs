@@ -78,51 +78,60 @@ impl Harness {
             },
         };
 
-        // Warmup: 3 iterations, results discarded
+        // Warmup: 3 iterations, results discarded. Reset before each call so
+        // write scenarios see a pristine DB per iteration.
         for _ in 0..3 {
+            let _ = (scenario.reset)(&mut fixtures);
             let _ = std::panic::catch_unwind(AssertUnwindSafe(|| (scenario.thunder)(&mut fixtures)));
+            let _ = (scenario.reset)(&mut fixtures);
             let _ = std::panic::catch_unwind(AssertUnwindSafe(|| (scenario.sqlite)(&fixtures)));
         }
 
-        // Sample Thunder (reopen between samples if COLD)
+        // Sample Thunder — reset before each sample (outside timer), per-iter panic guard
         let samples = self.config.sample_count;
-        let thunder_panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            let mut timings = Vec::with_capacity(samples);
-            for _ in 0..samples {
-                if cache == CacheState::Cold {
-                    let _ = crate::common::fixtures::reopen_handles(&mut fixtures);
-                }
-                let t0 = Instant::now();
-                (scenario.thunder)(&mut fixtures);
-                timings.push(t0.elapsed().as_nanos());
+        let mut thunder_timings: Vec<u128> = Vec::with_capacity(samples);
+        let mut thunder_panicked = false;
+        for _ in 0..samples {
+            if cache == CacheState::Cold {
+                let _ = crate::common::fixtures::reopen_handles(&mut fixtures);
             }
-            Harness::reduce(timings)
-        }));
-        let thunder = match thunder_panic {
-            Ok((median, p95, out)) => Some(EngineTiming {
-                median_ns: median, p95_ns: p95, sample_count: samples, dropped_outliers: out
-            }),
-            Err(_) => None,
+            if let Err(msg) = (scenario.reset)(&mut fixtures) {
+                eprintln!("reset returned Err: {}", msg);
+            }
+            let t0 = Instant::now();
+            let guard = std::panic::catch_unwind(AssertUnwindSafe(|| (scenario.thunder)(&mut fixtures)));
+            let elapsed = t0.elapsed().as_nanos();
+            if guard.is_err() { thunder_panicked = true; break; }
+            thunder_timings.push(elapsed);
+        }
+        let thunder = if thunder_panicked {
+            None
+        } else {
+            let (median, p95, out) = Harness::reduce(thunder_timings);
+            Some(EngineTiming { median_ns: median, p95_ns: p95, sample_count: samples, dropped_outliers: out })
         };
 
-        // Sample SQLite (reopen between samples if COLD)
-        let sqlite_panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            let mut timings = Vec::with_capacity(samples);
-            for _ in 0..samples {
-                if cache == CacheState::Cold {
-                    let _ = crate::common::fixtures::reopen_handles(&mut fixtures);
-                }
-                let t0 = Instant::now();
-                (scenario.sqlite)(&fixtures);
-                timings.push(t0.elapsed().as_nanos());
+        // Sample SQLite — reset before each sample (outside timer)
+        let mut sqlite_timings: Vec<u128> = Vec::with_capacity(samples);
+        let mut sqlite_panicked = false;
+        for _ in 0..samples {
+            if cache == CacheState::Cold {
+                let _ = crate::common::fixtures::reopen_handles(&mut fixtures);
             }
-            Harness::reduce(timings)
-        }));
-        let sqlite = match sqlite_panic {
-            Ok((median, p95, out)) => Some(EngineTiming {
-                median_ns: median, p95_ns: p95, sample_count: samples, dropped_outliers: out
-            }),
-            Err(_) => None,
+            if let Err(msg) = (scenario.reset)(&mut fixtures) {
+                eprintln!("reset returned Err: {}", msg);
+            }
+            let t0 = Instant::now();
+            let guard = std::panic::catch_unwind(AssertUnwindSafe(|| (scenario.sqlite)(&fixtures)));
+            let elapsed = t0.elapsed().as_nanos();
+            if guard.is_err() { sqlite_panicked = true; break; }
+            sqlite_timings.push(elapsed);
+        }
+        let sqlite = if sqlite_panicked {
+            None
+        } else {
+            let (median, p95, out) = Harness::reduce(sqlite_timings);
+            Some(EngineTiming { median_ns: median, p95_ns: p95, sample_count: samples, dropped_outliers: out })
         };
 
         // Correctness check
@@ -375,6 +384,28 @@ mod tests {
         assert_eq!(r.cells.len(), 2);
         assert_eq!(r.cells[0].results.len(), 1);
         assert_eq!(r.summary.unsupported, 1);
+    }
+
+    #[test]
+    fn reset_hook_fires_before_each_sample_and_warmup() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let h = Harness { config: HarnessConfig {
+            tiers: vec![Tier::Small], durabilities: vec![Durability::Fast],
+            cache_states: vec![CacheState::Warm], sample_count: 3, update_baseline: false,
+        }};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::clone(&calls);
+        let s = Scenario::new("reset_probe", "write")
+            .setup(|t, m| build_blog_fixtures(t, m))
+            .reset(move |_f| { calls2.fetch_add(1, Ordering::SeqCst); Ok(()) })
+            .thunder(|_f| {}).sqlite(|_f| {}).assert(|_f| Ok(())).build();
+        let _ = h.run_one(&s, Tier::Small, Durability::Fast, CacheState::Warm);
+        // Warmup: 3 iters × 2 engines = 6 resets.
+        // Sample loop: 3 iters × 2 engines = 6 resets.
+        // Total: 12.
+        assert_eq!(calls.load(Ordering::SeqCst), 12);
     }
 
     #[test]
