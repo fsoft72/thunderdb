@@ -5,6 +5,13 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use thunderdb::Database;
 
+/// Which storage engine a [`Snapshot`] captures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    Thunder,
+    Sqlite,
+}
+
 /// Reserved seed for any fixture that needs randomness.
 /// Base blog fixture is index-derived and doesn't use it.
 pub const FIXTURE_SEED: u64 = 0xD811_1DB5_EED5_5EED;
@@ -339,5 +346,14 @@ mod tests {
         assert_eq!(comments_for_post(1), 3);
         assert_eq!(comments_for_post(2), 4);
         assert_eq!(comments_for_post(3), 2);
+    }
+
+    #[test]
+    fn engine_enum_has_variants() {
+        let e = Engine::Thunder;
+        match e {
+            Engine::Thunder => {}
+            Engine::Sqlite => {}
+        }
     }
 }
