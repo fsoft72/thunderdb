@@ -391,6 +391,63 @@ pub fn build_blog_fixtures(tier: Tier, mode: Durability) -> Fixtures {
     make_fixtures(tier, mode, thunder_dir, sqlite_path, tdb, sdb)
 }
 
+/// Build the same blog schema as `build_blog_fixtures` but with zero rows in
+/// posts and comments. Users table is left empty as well. Intended for INSERT
+/// benchmarks that measure population cost starting from an empty DB.
+pub fn build_empty_fixtures(tier: Tier, mode: Durability) -> Fixtures {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use thunderdb::storage::table_engine::{ColumnInfo, TableSchema};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = format!(
+        "{}_{}_{}_empty_{}",
+        std::process::id(), tier.label(), mode.label(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    );
+    let base = std::env::temp_dir().join(format!("thunderdb_perf_{}", unique));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let thunder_dir = base.join("thunder");
+    let sqlite_path = base.join("sqlite.db");
+
+    let mut tdb = Database::open(&thunder_dir).expect("open thunderdb");
+    for (table, cols) in [
+        ("users", vec![
+            ColumnInfo { name: "id".into(), data_type: "INT32".into() },
+            ColumnInfo { name: "name".into(), data_type: "VARCHAR".into() },
+            ColumnInfo { name: "email".into(), data_type: "VARCHAR".into() },
+        ]),
+        ("blog_posts", vec![
+            ColumnInfo { name: "id".into(), data_type: "INT32".into() },
+            ColumnInfo { name: "author_id".into(), data_type: "INT32".into() },
+            ColumnInfo { name: "title".into(), data_type: "VARCHAR".into() },
+            ColumnInfo { name: "content".into(), data_type: "VARCHAR".into() },
+        ]),
+        ("comments", vec![
+            ColumnInfo { name: "id".into(), data_type: "INT32".into() },
+            ColumnInfo { name: "post_id".into(), data_type: "INT32".into() },
+            ColumnInfo { name: "author_id".into(), data_type: "INT32".into() },
+            ColumnInfo { name: "text".into(), data_type: "VARCHAR".into() },
+        ]),
+    ] {
+        let tbl = tdb.get_or_create_table(table).unwrap();
+        tbl.set_schema(TableSchema { columns: cols }).unwrap();
+        tbl.create_index("id").unwrap();
+    }
+
+    let sdb = Connection::open(&sqlite_path).unwrap();
+    match mode {
+        Durability::Fast => { sdb.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").unwrap(); }
+        Durability::Durable => { sdb.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;").unwrap(); }
+    }
+    sdb.execute_batch(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL);
+         CREATE TABLE blog_posts (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL);
+         CREATE TABLE comments (id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, author_id INTEGER NOT NULL, text TEXT NOT NULL);"
+    ).unwrap();
+
+    make_fixtures(tier, mode, thunder_dir, sqlite_path, tdb, sdb)
+}
+
 /// Close and reopen both engine handles. Used between COLD samples.
 pub(crate) fn reopen_handles(f: &mut Fixtures) -> std::io::Result<()> {
     let (_t, _s) = f.take_handles();
@@ -505,6 +562,16 @@ mod tests {
             Engine::Thunder => {}
             Engine::Sqlite => {}
         }
+    }
+
+    #[test]
+    fn empty_fixture_has_zero_rows() {
+        let mut f = build_empty_fixtures(Tier::Small, Durability::Fast);
+        use thunderdb::DirectDataAccess;
+        assert_eq!(f.thunder_mut().count("blog_posts", vec![]).unwrap(), 0);
+        let s: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+        assert_eq!(s, 0);
+        drop_fixtures(f);
     }
 
     #[test]
