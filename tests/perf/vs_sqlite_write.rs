@@ -200,6 +200,54 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+        // W5. UPDATE every row by primary key, single txn
+        Scenario::new("W5. UPDATE 10k by PK", "write")
+            .setup(|t, m| { let mut f = build_blog_fixtures(t, m); f.snapshot_all().unwrap(); f })
+            .reset(|f| f.restore_all().map_err(|e| format!("restore: {}", e)))
+            .thunder(|f| {
+                let db = f.thunder_mut();
+                let n = db.count("blog_posts", vec![]).unwrap() as i32;
+                for i in 1..=n {
+                    db.update("blog_posts",
+                        vec![Filter::new("id", Operator::Equals(Value::Int32(i)))],
+                        vec![("title".into(), Value::varchar(format!("Updated #{}", i)))]).unwrap();
+                }
+            })
+            .sqlite(|f| {
+                let tx = f.sqlite().unchecked_transaction().unwrap();
+                {
+                    let mut st = tx.prepare("UPDATE blog_posts SET title = ?1 WHERE id = ?2").unwrap();
+                    let n: i64 = tx.query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                    for i in 1..=n as i32 {
+                        st.execute(params![format!("Updated #{}", i), i]).unwrap();
+                    }
+                }
+                tx.commit().unwrap();
+            })
+            .assert(|f| {
+                // Re-apply Thunder update so both engines match for correctness check.
+                let db = f.thunder_mut();
+                let n = db.count("blog_posts", vec![]).unwrap() as i32;
+                for i in 1..=n {
+                    db.update("blog_posts",
+                        vec![Filter::new("id", Operator::Equals(Value::Int32(i)))],
+                        vec![("title".into(), Value::varchar(format!("Updated #{}", i)))]).unwrap();
+                }
+                let tc = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+                let sc: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                if tc as i64 != sc {
+                    return Err(format!("W5 row-count drift: thunder={}, sqlite={}", tc, sc));
+                }
+                let tt = f.thunder_mut().scan_with_projection("blog_posts",
+                    vec![Filter::new("id", Operator::Equals(Value::Int32(1)))],
+                    None, None, Some(vec![2])).unwrap();
+                let st: String = f.sqlite().query_row("SELECT title FROM blog_posts WHERE id = 1", [], |r| r.get(0)).unwrap();
+                if !format!("{:?}", tt).contains("Updated #1") || st != "Updated #1" {
+                    return Err(format!("W5 update missing: thunder={:?}, sqlite={}", tt, st));
+                }
+                Ok(())
+            })
+            .build(),
     ]
 }
 
