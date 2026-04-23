@@ -302,6 +302,70 @@ impl TableEngine {
         Ok(true)
     }
 
+    /// Update a row, using caller-supplied old values for index maintenance.
+    ///
+    /// Identical to `update_row` but skips the redundant `get_row` read
+    /// because the caller already holds the old row from a prior scan.
+    /// This avoids triggering an mmap-remap + sync_all between the scan
+    /// and the write when the table has indices.
+    ///
+    /// # Arguments
+    /// * `row_id`     - Row ID (ctid packed as u64) to update
+    /// * `old_values` - Previous column values (for index removal)
+    /// * `values`     - New column values to write
+    ///
+    /// # Returns
+    /// true if the row was updated
+    pub(crate) fn _update_row_with_old(
+        &mut self,
+        row_id: u64,
+        old_values: Vec<Value>,
+        values: Vec<Value>,
+    ) -> Result<bool> {
+        let old_ctid = Ctid::from_u64(row_id);
+        let new_ctid = self.paged_table.update_row(old_ctid, &values)?;
+        let new_row_id = new_ctid.to_u64();
+
+        if !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
+            self.index_manager.delete_row(row_id, &old_values, &mapping)?;
+            let new_row = Row::new(new_row_id, values);
+            self.index_manager.insert_row(&new_row, &mapping)?;
+        }
+
+        Ok(true)
+    }
+
+    /// Delete a row, using caller-supplied old values for index maintenance.
+    ///
+    /// Identical to `delete_by_id` but skips the redundant `get_row` read
+    /// because the caller already holds the old row from a prior scan.
+    ///
+    /// # Arguments
+    /// * `row_id`     - Row ID (ctid packed as u64) to delete
+    /// * `old_values` - Previous column values (for index removal)
+    ///
+    /// # Returns
+    /// true if the row was deleted
+    pub(crate) fn _delete_with_old_values(
+        &mut self,
+        row_id: u64,
+        old_values: Vec<Value>,
+    ) -> Result<bool> {
+        let ctid = Ctid::from_u64(row_id);
+        let deleted = self.paged_table.delete_row(ctid)?;
+        if !deleted {
+            return Ok(false);
+        }
+
+        if !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
+            self.index_manager.delete_row(row_id, &old_values, &mapping)?;
+        }
+
+        Ok(true)
+    }
+
     /// Delete a row by ID
     ///
     /// Reads the row before deleting so we can remove it from indices.

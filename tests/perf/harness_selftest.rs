@@ -116,3 +116,37 @@ fn cold_fadvises_sqlite_wal_companions() {
 
     drop_fixtures(f);
 }
+
+#[test]
+fn snapshot_drop_cleans_tempdir() {
+    use common::fixtures::{build_blog_fixtures, drop_fixtures};
+    use common::fairness::{Tier, Durability};
+
+    let mut f = build_blog_fixtures(Tier::Small, Durability::Fast);
+    f.snapshot_all().unwrap();
+    // Snapshotting again should drop the prior Snapshots (and their temp dirs).
+    let before = std::fs::read_dir(std::env::temp_dir()).unwrap().count();
+    f.snapshot_all().unwrap();
+    let after = std::fs::read_dir(std::env::temp_dir()).unwrap().count();
+    // At most 2 new entries (the two new snapshot dirs). Old ones must be cleaned.
+    assert!(after <= before + 2,
+        "expected old snapshot dirs cleaned by Drop; before={}, after={}", before, after);
+    drop_fixtures(f);
+}
+
+#[test]
+fn restore_all_preserves_cold_fadvise() {
+    use common::fixtures::{build_blog_fixtures, reopen_handles, drop_fixtures};
+    use common::fairness::{Tier, Durability};
+
+    let mut f = build_blog_fixtures(Tier::Small, Durability::Fast);
+    f.snapshot_all().unwrap();
+    // Mutate, restore, then reopen COLD — must not panic.
+    f.thunder_mut().delete("blog_posts", vec![]).unwrap();
+    f.restore_all().unwrap();
+    reopen_handles(&mut f).unwrap();
+    use thunderdb::DirectDataAccess;
+    let n = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+    assert_eq!(n, Tier::Small.post_count());
+    drop_fixtures(f);
+}

@@ -1,5 +1,41 @@
 # ThunderDB Changes
 
+## 2026-04-23 - SP3: Write-path benchmarks
+
+Third sub-project in the "faster than SQLite in all benchmarks" program. Adds write-path coverage and surfaces honest data on Thunder's mutation hot spots.
+
+- **9 new write scenarios** in `tests/perf/vs_sqlite_write.rs`: W1 INSERT per-row commit, W2 INSERT single txn, W3 INSERT batch 1000, W4 INSERT with secondary index, W5 UPDATE by PK, W6 UPDATE by indexed column, W7 DELETE by PK, W8 DELETE by range predicate, W9 Mixed INSERT+UPDATE+DELETE.
+- **`Snapshot` primitive** in `tests/perf/common/fixtures.rs` — byte-copies pristine engine files to a temp dir and restores them before each sample so write benchmarks reset deterministically. `Fixtures::snapshot_all` / `restore_all` reset both engines. Snapshot `Drop` cleans the temp dir. Reusable by SP5 (large-scale) and SP7 (concurrency).
+- **`reset` hook on `Scenario`** — called by the harness before every warmup iteration and every timed sample, outside the timer. Default no-op keeps the read suite unchanged.
+- **Soft FAST/WARM loss gate** by default (warns on Loss); strict gate via `SP3_STRICT_LOSS_GATE=1`. Chosen because the run surfaced architectural write-path gaps that will not close inside SP3.
+- **Write-path perf fix (Task 16)**: two real bugs fixed.
+  - `src/storage/page_file.rs`: stopped marking the mmap stale on writes to *existing* pages. Linux's page cache is coherent with mmap for a given fd; remap is only needed when `allocate_page` extends the file. Saved an munmap+mmap syscall pair per read-after-write inside update/delete loops.
+  - `src/storage/table_engine.rs` + `src/lib.rs`: added crate-internal `_update_row_with_old` / `_delete_with_old_values` so update/delete can reuse the `Row` already returned by `scan_with_limit` instead of issuing a second `get_row`. Halves the reads per mutated row for index maintenance.
+- **FAST/WARM ratios (SMALL tier, 11 samples)**:
+
+  | Scenario | Thunder | SQLite | Ratio | Verdict |
+  |---|---|---|---|---|
+  | W1. INSERT 10k per-row commit | 14.1 ms | 30.9 ms | 0.46x | **Win** |
+  | W2. INSERT 10k single txn | 1.9 ms | 3.5 ms | 0.54x | **Win** |
+  | W3. INSERT 10k batch 1000 | 2.0 ms | 3.7 ms | 0.55x | **Win** |
+  | W4. INSERT 10k w/ secondary index | 1.9 ms | 9.5 ms | 0.20x | **Win** |
+  | W5. UPDATE 10k by PK | 1375 ms | 9.9 ms | 139x | Loss |
+  | W6. UPDATE by indexed column | 6.3 ms | 1.8 ms | 3.40x | Loss |
+  | W7. DELETE 10k by PK | 738 ms | 7.9 ms | 94x | Loss |
+  | W8. DELETE by range predicate | 6.6 ms | 2.3 ms | 2.93x | Loss |
+  | W9. Mixed INSERT+UPDATE+DELETE | 325 ms | 3.3 ms | 98x | Loss |
+
+- **FAST/COLD** is within 5% of FAST/WARM for every write scenario. Writes hit the buffer pool / WAL path regardless of OS-page-cache state, so COLD does not meaningfully penalise the mutator — a notable contrast with the read suite, where COLD exposes Thunder's eager index-load cost.
+- **Remaining losses are architectural**, deferred to a follow-up SP (tentative "SP3b: Thunder write-path optimization"):
+  - **Append-only mutation**: every update is `delete_row` + `insert_row` — two read-then-write cycles per row, vs SQLite's single in-place update. A `paged_table` in-place update path would halve per-row I/O.
+  - **Per-row index maintenance**: `blog_posts` has three indexes (id, author_id, title). Each update triggers 6 B-tree operations, including string comparisons for the VARCHAR title. Deferred/batched index maintenance or a more cache-friendly B-tree node format would help.
+  - These are multi-file refactors touching `paged_table`, `btree`, `IndexManager` — out of scope for SP3.
+- **Separate baseline file**: write scenarios are committed to `perf/baseline-write.json` (the read suite keeps `perf/baseline.json`). The harness's `save_baseline` replaces the whole file on promotion; using separate files per test binary avoids cross-suite interference. Both files are tracked in git.
+- **Selftests**: snapshot Drop cleanup, restore_all + COLD fadvise interop, reset-hook fires-per-sample-and-warmup. All under `tests/perf/harness_selftest.rs` and `tests/perf/common/{scenario,runner}.rs`.
+
+Spec: `docs/superpowers/specs/2026-04-23-sp3-write-path-design.md`
+Plan: `docs/superpowers/plans/2026-04-23-sp3-write-path.md`
+
 ## 2026-04-16 - SP2: Full-scan closure & COLD fairness fix
 
 Second sub-project in the "faster than SQLite in all benchmarks" program.
