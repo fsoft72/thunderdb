@@ -88,9 +88,14 @@ impl PageFile {
     }
 
     /// Remap if stale (called lazily before reads).
+    ///
+    /// On Linux the kernel page cache is coherent between `write_all` and
+    /// `mmap` of the same file descriptor, so no `sync_all` / fsync is
+    /// required for read-after-write correctness within the same process.
+    /// The earlier `sync_all` call here was an unnecessary fsync that
+    /// caused O(N) fsync overhead in per-row update/delete loops.
     fn remap_if_needed(&mut self) -> Result<()> {
         if self.stale_mmap {
-            self.file.sync_all()?;
             self.setup_mmap()?;
         }
         Ok(())
@@ -144,6 +149,11 @@ impl PageFile {
     }
 
     /// Write a page to the file.
+    ///
+    /// Does NOT mark the mmap stale: on Linux the kernel page cache is
+    /// coherent between `write_all` and `mmap` reads of the same file, so
+    /// the in-process mmap view reflects the write immediately.  Only
+    /// `allocate_page` (which extends the file) must remap.
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let page_id = page.page_id();
         if page_id >= self.page_count {
@@ -158,7 +168,8 @@ impl PageFile {
 
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(&bytes)?;
-        self.stale_mmap = true;
+        // stale_mmap intentionally NOT set: writes to existing pages are
+        // visible through the current mmap without remapping.
 
         Ok(())
     }
@@ -200,10 +211,11 @@ impl PageFile {
         let fsm_value = (free_space / FSM_GRANULARITY).min(255) as u8;
         let byte_offset = FSM_DATA_OFFSET + fsm_index;
 
-        // Write directly to the FSM page in the file
+        // Write directly to the FSM page in the file.
+        // Like write_page, does NOT mark mmap stale: the FSM byte is within
+        // an existing page and the kernel page cache keeps mmap coherent.
         self.file.seek(SeekFrom::Start(byte_offset as u64))?;
         self.file.write_all(&[fsm_value])?;
-        self.stale_mmap = true;
 
         Ok(())
     }

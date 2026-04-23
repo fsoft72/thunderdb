@@ -612,7 +612,10 @@ impl DirectDataAccess for Database {
         filters: Vec<Filter>,
         updates: Vec<(String, Value)>,
     ) -> Result<usize> {
-        // Collect matching rows in a single scan pass (keep full Row data)
+        // Collect matching rows in a single scan pass (keep full Row data).
+        // Rows already carry old values — we pass them to _update_row_with_old
+        // to avoid a redundant get_row read inside TableEngine (which would
+        // trigger an mmap sync_all after every write).
         let rows = self.scan(table, filters)?;
 
         if rows.is_empty() {
@@ -623,8 +626,11 @@ impl DirectDataAccess for Database {
         let column_mapping = table_engine.build_column_mapping();
         let count = rows.len();
 
-        for mut row in rows {
-            // Apply updates to row.values
+        for row in rows {
+            let old_values = row.values.clone();
+            let mut new_values = row.values;
+
+            // Apply updates to new_values
             for (col_name, new_val) in &updates {
                 let col_idx = if let Some(&idx) = column_mapping.get(col_name) {
                     Some(idx)
@@ -635,36 +641,36 @@ impl DirectDataAccess for Database {
                 };
 
                 if let Some(idx) = col_idx {
-                    if idx < row.values.len() {
-                        row.values[idx] = new_val.clone();
+                    if idx < new_values.len() {
+                        new_values[idx] = new_val.clone();
                     }
                 }
             }
 
-            table_engine.update_row(row.row_id, row.values)?;
+            table_engine._update_row_with_old(row.row_id, old_values, new_values)?;
         }
 
         Ok(count)
     }
 
     fn delete(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
-        // Collect matching row_ids in a single scan pass
-        let row_ids: Vec<u64> = self.scan(table, filters)?
-            .into_iter()
-            .map(|r| r.row_id)
-            .collect();
+        // Collect matching rows in a single scan pass.
+        // Rows already carry old values — we pass them to _delete_with_old_values
+        // to avoid a redundant get_row read inside TableEngine (which would
+        // trigger an mmap sync_all after every write when the table has indices).
+        let rows = self.scan(table, filters)?;
 
-        if row_ids.is_empty() {
+        if rows.is_empty() {
             return Ok(0);
         }
 
-        // Delete each row by ID (no second scan needed)
+        let count = rows.len();
         let table_engine = self.get_table_mut(table)?;
-        for row_id in &row_ids {
-            table_engine.delete_by_id(*row_id)?;
+        for row in rows {
+            table_engine._delete_with_old_values(row.row_id, row.values)?;
         }
 
-        Ok(row_ids.len())
+        Ok(count)
     }
 
     /// Count rows matching the given filters, using index-only or callback paths
