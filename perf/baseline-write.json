@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "git_sha": "5a1fa38c844eaf9d558b3cd2750bf73597dd37c6",
+  "rustc_version": "rustc 1.91.0 (f8297e351 2025-10-28)",
+  "started_at": "unix:1776929023",
+  "cells": [
+    {
+      "tier": "SMALL",
+      "mode": "FAST",
+      "cache": "WARM",
+      "results": [
+        {
+          "scenario": "W1. INSERT 10k per-row commit",
+          "group": "write",
+          "thunder": {
+            "median_ns": 15484222,
+            "p95_ns": 15792457,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 32782231,
+            "p95_ns": 32988305,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.47233582119532985,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "W2. INSERT 10k single txn",
+          "group": "write",
+          "thunder": {
+            "median_ns": 2142418,
+            "p95_ns": 2243748,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 3869621,
+            "p95_ns": 4110614,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.5536506029918692,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "W3. INSERT 10k batch 1000",
+          "group": "write",
+          "thunder": {
+            "median_ns": 2169927,
+            "p95_ns": 2357702,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 4008169,
+            "p95_ns": 4105673,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.5413761246095162,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "W4. INSERT 10k w/ secondary index",
+          "group": "write",
+          "thunder": {
+            "median_ns": 2122930,
+            "p95_ns": 2350537,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 10258329,
+            "p95_ns": 10411238,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 0.20694695988011302,
+          "verdict": "Win"
+        },
+        {
+          "scenario": "W5. UPDATE 10k by PK",
+          "group": "write",
+          "thunder": {
+            "median_ns": 1471512352,
+            "p95_ns": 1479564368,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 10517060,
+            "p95_ns": 10719328,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 139.91670219624115,
+          "verdict": "Loss"
+        },
+        {
+          "scenario": "W6. UPDATE by indexed column",
+          "group": "write",
+          "thunder": {
+            "median_ns": 6700589,
+            "p95_ns": 6815768,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 1947884,
+            "p95_ns": 1999839,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 3.4399322546927844,
+          "verdict": "Loss"
+        },
+        {
+          "scenario": "W7. DELETE 10k by PK",
+          "group": "write",
+          "thunder": {
+            "median_ns": 795794294,
+            "p95_ns": 801917457,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 7746913,
+            "p95_ns": 8094182,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 102.72405201917202,
+          "verdict": "Loss"
+        },
+        {
+          "scenario": "W8. DELETE by range predicate",
+          "group": "write",
+          "thunder": {
+            "median_ns": 6572296,
+            "p95_ns": 7116237,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 2287239,
+            "p95_ns": 2560428,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 2.8734627207738237,
+          "verdict": "Loss"
+        },
+        {
+          "scenario": "W9. Mixed INSERT+UPDATE+DELETE",
+          "group": "write",
+          "thunder": {
+            "median_ns": 291141792,
+            "p95_ns": 318473288,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "sqlite": {
+            "median_ns": 2974121,
+            "p95_ns": 3055292,
+            "sample_count": 11,
+            "dropped_outliers": 0
+          },
+          "ratio": 97.89171052556368,
+          "verdict": "Loss"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "win": 4,
+    "tie": 0,
+    "loss": 5,
+    "unsupported": 0,
+    "failure": 0
+  }
+}

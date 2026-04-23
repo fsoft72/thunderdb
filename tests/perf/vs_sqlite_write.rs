@@ -400,7 +400,7 @@ fn scenarios() -> Vec<Scenario> {
 fn vs_sqlite_write() {
     use std::path::PathBuf;
     let harness = Harness::from_env();
-    let baseline_path = PathBuf::from("perf/baseline.json");
+    let baseline_path = PathBuf::from("perf/baseline-write.json");
     let artifact_dir = PathBuf::from("target/perf");
     let report = harness.run(&scenarios(), &baseline_path, &artifact_dir);
 
