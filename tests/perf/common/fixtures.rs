@@ -2,7 +2,7 @@
 
 use crate::common::fairness::{Tier, Durability};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thunderdb::Database;
 
 /// Which storage engine a [`Snapshot`] captures.
@@ -10,6 +10,112 @@ use thunderdb::Database;
 pub enum Engine {
     Thunder,
     Sqlite,
+}
+
+/// Filesystem snapshot of a single engine's on-disk state. Used to reset
+/// mutated databases to a pristine baseline between write-benchmark samples.
+/// The temp directory is cleaned on `Drop`.
+pub struct Snapshot {
+    engine: Engine,
+    snapshot_dir: PathBuf,
+    /// Live file/dir paths that were captured, relative to snapshot_dir.
+    entries: Vec<PathBuf>,
+}
+
+impl Snapshot {
+    /// Capture a pristine copy of the engine files at `live_path` into a new temp dir.
+    ///
+    /// Thunder: `live_path` is a directory; every file inside is copied recursively.
+    /// SQLite: `live_path` is the main `.db` file; `-wal` and `-shm` companions are
+    /// captured when present.
+    pub fn capture(engine: Engine, live_path: &Path) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let snap_dir = std::env::temp_dir().join(format!("thunderdb_snap_{}_{}", std::process::id(), uniq));
+        std::fs::create_dir_all(&snap_dir)?;
+        let mut entries = Vec::new();
+        match engine {
+            Engine::Thunder => copy_dir_recursive(live_path, &snap_dir, Path::new(""), &mut entries)?,
+            Engine::Sqlite => {
+                let main_name: PathBuf = live_path.file_name().unwrap().into();
+                copy_file_if_exists(live_path, &snap_dir.join(&main_name), &mut entries, main_name)?;
+                for suffix in &["-wal", "-shm"] {
+                    let mut live = live_path.as_os_str().to_os_string();
+                    live.push(suffix);
+                    let live = PathBuf::from(live);
+                    let name: PathBuf = live.file_name().unwrap().into();
+                    copy_file_if_exists(&live, &snap_dir.join(&name), &mut entries, name)?;
+                }
+            }
+        }
+        Ok(Snapshot { engine, snapshot_dir: snap_dir, entries })
+    }
+
+    /// Restore pristine files to `live_path`, replacing any current content.
+    pub fn restore(&self, live_path: &Path) -> std::io::Result<()> {
+        match self.engine {
+            Engine::Thunder => {
+                if live_path.exists() { std::fs::remove_dir_all(live_path)?; }
+                std::fs::create_dir_all(live_path)?;
+                for rel in &self.entries {
+                    let src = self.snapshot_dir.join(rel);
+                    let dst = live_path.join(rel);
+                    if let Some(parent) = dst.parent() { std::fs::create_dir_all(parent)?; }
+                    std::fs::copy(&src, &dst)?;
+                }
+            }
+            Engine::Sqlite => {
+                let parent = live_path.parent().unwrap_or(Path::new("."));
+                for suffix in &["", "-wal", "-shm"] {
+                    let mut p = live_path.as_os_str().to_os_string();
+                    p.push(suffix);
+                    let p = PathBuf::from(p);
+                    if p.exists() { std::fs::remove_file(&p)?; }
+                }
+                for rel in &self.entries {
+                    let src = self.snapshot_dir.join(rel);
+                    let dst = parent.join(rel);
+                    std::fs::copy(&src, &dst)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.snapshot_dir);
+    }
+}
+
+fn copy_file_if_exists(src: &Path, dst: &Path, entries: &mut Vec<PathBuf>, rel: PathBuf) -> std::io::Result<()> {
+    if src.exists() {
+        std::fs::copy(src, dst)?;
+        entries.push(rel);
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src_root: &Path, dst_root: &Path, rel: &Path, entries: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let src = src_root.join(rel);
+    for entry in std::fs::read_dir(&src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let child_rel = rel.join(&name);
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            std::fs::create_dir_all(dst_root.join(&child_rel))?;
+            copy_dir_recursive(src_root, dst_root, &child_rel, entries)?;
+        } else {
+            let dst = dst_root.join(&child_rel);
+            if let Some(parent) = dst.parent() { std::fs::create_dir_all(parent)?; }
+            std::fs::copy(entry.path(), dst)?;
+            entries.push(child_rel);
+        }
+    }
+    Ok(())
 }
 
 /// Reserved seed for any fixture that needs randomness.
@@ -26,6 +132,8 @@ pub struct Fixtures {
     pub sqlite_path: PathBuf,
     thunder: Option<Database>,
     sqlite: Option<Connection>,
+    thunder_snap: Option<Snapshot>,
+    sqlite_snap: Option<Snapshot>,
 }
 
 impl Fixtures {
@@ -54,6 +162,44 @@ impl Fixtures {
         self.thunder = Some(t);
         self.sqlite = Some(s);
     }
+
+    /// Capture pristine snapshots of both engine file sets.
+    /// Must be called AFTER the fixture is fully built and BEFORE any measured
+    /// mutation. Closes and reopens handles around the capture so on-disk files
+    /// are flushed and self-consistent.
+    pub fn snapshot_all(&mut self) -> std::io::Result<()> {
+        let (t, s) = self.take_handles();
+        drop(t); drop(s);
+        // Drop any prior snapshots before capturing new ones so the old temp
+        // directories are cleaned immediately (important for the selftest that
+        // checks Drop cleanup).
+        self.thunder_snap = None;
+        self.sqlite_snap = None;
+        self.thunder_snap = Some(Snapshot::capture(Engine::Thunder, &self.thunder_dir)?);
+        self.sqlite_snap  = Some(Snapshot::capture(Engine::Sqlite,  &self.sqlite_path)?);
+        let t = Database::open(&self.thunder_dir)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        let s = Connection::open(&self.sqlite_path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        self.set_handles(t, s);
+        Ok(())
+    }
+
+    /// Restore pristine files to both engines from the snapshots taken by
+    /// `snapshot_all`. Handles are closed, files replaced, handles reopened.
+    /// Panics if `snapshot_all` has not been called.
+    pub fn restore_all(&mut self) -> std::io::Result<()> {
+        let (t, s) = self.take_handles();
+        drop(t); drop(s);
+        self.thunder_snap.as_ref().expect("snapshot_all not called").restore(&self.thunder_dir)?;
+        self.sqlite_snap.as_ref().expect("snapshot_all not called").restore(&self.sqlite_path)?;
+        let t = Database::open(&self.thunder_dir)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        let s = Connection::open(&self.sqlite_path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        self.set_handles(t, s);
+        Ok(())
+    }
 }
 
 /// Construct a Fixtures instance from pre-opened handles and path metadata.
@@ -62,7 +208,11 @@ pub(crate) fn make_fixtures(
     thunder_dir: PathBuf, sqlite_path: PathBuf,
     thunder: Database, sqlite: Connection,
 ) -> Fixtures {
-    Fixtures { tier, mode, thunder_dir, sqlite_path, thunder: Some(thunder), sqlite: Some(sqlite) }
+    Fixtures {
+        tier, mode, thunder_dir, sqlite_path,
+        thunder: Some(thunder), sqlite: Some(sqlite),
+        thunder_snap: None, sqlite_snap: None,
+    }
 }
 
 /// Deterministic per-post comment count (2-4).
@@ -355,5 +505,29 @@ mod tests {
             Engine::Thunder => {}
             Engine::Sqlite => {}
         }
+    }
+
+    #[test]
+    fn snapshot_and_restore_roundtrip_blog_fixture() {
+        use rusqlite::params;
+        use thunderdb::DirectDataAccess;
+
+        let mut f = build_blog_fixtures(Tier::Small, Durability::Fast);
+        f.snapshot_all().unwrap();
+
+        // Mutate both engines after snapshot.
+        f.thunder_mut().delete("blog_posts", vec![]).unwrap();
+        let _ = f.sqlite().execute("DELETE FROM blog_posts", params![]).unwrap();
+
+        // Restore.
+        f.restore_all().unwrap();
+
+        // Row counts match the pristine fixture.
+        let t_posts = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+        let s_posts: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+        assert_eq!(t_posts, Tier::Small.post_count());
+        assert_eq!(s_posts as usize, Tier::Small.post_count());
+
+        drop_fixtures(f);
     }
 }
