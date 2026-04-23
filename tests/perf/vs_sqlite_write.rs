@@ -150,6 +150,56 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+        // W4. INSERT 10k rows into a table with a secondary index (author_id)
+        Scenario::new("W4. INSERT 10k w/ secondary index", "write")
+            .setup(|t, m| {
+                let mut f = build_empty_fixtures(t, m);
+                {
+                    let tbl = f.thunder_mut().get_table_mut("blog_posts").unwrap();
+                    tbl.create_index("author_id").unwrap();
+                    tbl.create_index("title").unwrap();
+                }
+                f.sqlite().execute_batch(
+                    "CREATE INDEX idx_posts_author ON blog_posts(author_id);
+                     CREATE INDEX idx_posts_title ON blog_posts(title);"
+                ).unwrap();
+                f.snapshot_all().unwrap();
+                f
+            })
+            .reset(|f| f.restore_all().map_err(|e| format!("restore: {}", e)))
+            .thunder(|f| {
+                let rows: Vec<Vec<Value>> = (1..=WRITE_ROW_COUNT as i32).map(|i| vec![
+                    Value::Int32(i), Value::Int32((i % 5) + 1),
+                    Value::varchar(format!("Post #{}", i)),
+                    Value::varchar(format!("Body of post {}", i)),
+                ]).collect();
+                f.thunder_mut().insert_batch("blog_posts", rows).unwrap();
+            })
+            .sqlite(|f| {
+                let tx = f.sqlite().unchecked_transaction().unwrap();
+                {
+                    let mut st = tx.prepare("INSERT INTO blog_posts (id, author_id, title, content) VALUES (?1, ?2, ?3, ?4)").unwrap();
+                    for i in 1..=WRITE_ROW_COUNT as i32 {
+                        st.execute(params![i, (i % 5) + 1, format!("Post #{}", i), format!("Body of post {}", i)]).unwrap();
+                    }
+                }
+                tx.commit().unwrap();
+            })
+            .assert(|f| {
+                // Repopulate Thunder (reset runs last before assert, leaving empty DB).
+                let rows: Vec<Vec<Value>> = (1..=WRITE_ROW_COUNT as i32).map(|i| vec![
+                    Value::Int32(i), Value::Int32((i % 5) + 1),
+                    Value::varchar(format!("Post #{}", i)),
+                    Value::varchar(format!("Body of post {}", i)),
+                ]).collect();
+                f.thunder_mut().insert_batch("blog_posts", rows).unwrap();
+                let t = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+                let s: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                if t != WRITE_ROW_COUNT || s as usize != WRITE_ROW_COUNT {
+                    Err(format!("W4 count mismatch: thunder={}, sqlite={}", t, s))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
