@@ -308,6 +308,28 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+        // W8. DELETE by a range predicate: remove all posts with id > 5000
+        Scenario::new("W8. DELETE by range predicate", "write")
+            .setup(|t, m| { let mut f = build_blog_fixtures(t, m); f.snapshot_all().unwrap(); f })
+            .reset(|f| f.restore_all().map_err(|e| format!("restore: {}", e)))
+            .thunder(|f| {
+                f.thunder_mut().delete("blog_posts",
+                    vec![Filter::new("id", Operator::GreaterThan(Value::Int32(5000)))]).unwrap();
+            })
+            .sqlite(|f| {
+                f.sqlite().execute("DELETE FROM blog_posts WHERE id > 5000", params![]).unwrap();
+            })
+            .assert(|f| {
+                // Re-apply Thunder delete so both engines are in the same state.
+                f.thunder_mut().delete("blog_posts",
+                    vec![Filter::new("id", Operator::GreaterThan(Value::Int32(5000)))]).unwrap();
+                let t = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+                let s: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                if t as i64 != s {
+                    Err(format!("W8 mismatch: thunder={}, sqlite={}", t, s))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
