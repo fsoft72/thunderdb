@@ -330,6 +330,69 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+        // W9. Mixed mutation burst: insert 1000 new rows, update 1000 existing,
+        // delete 1000 existing, all in a single logical operation.
+        Scenario::new("W9. Mixed INSERT+UPDATE+DELETE", "write")
+            .setup(|t, m| { let mut f = build_blog_fixtures(t, m); f.snapshot_all().unwrap(); f })
+            .reset(|f| f.restore_all().map_err(|e| format!("restore: {}", e)))
+            .thunder(|f| {
+                let db = f.thunder_mut();
+                let new_rows: Vec<Vec<Value>> = (10_001..=11_000).map(|i| vec![
+                    Value::Int32(i), Value::Int32((i % 5) + 1),
+                    Value::varchar(format!("Mixed #{}", i)),
+                    Value::varchar("Mixed body"),
+                ]).collect();
+                db.insert_batch("blog_posts", new_rows).unwrap();
+                for i in 1..=1000 {
+                    db.update("blog_posts",
+                        vec![Filter::new("id", Operator::Equals(Value::Int32(i)))],
+                        vec![("title".into(), Value::varchar(format!("Mixed-upd #{}", i)))]).unwrap();
+                }
+                for i in 2001..=3000 {
+                    db.delete("blog_posts", vec![Filter::new("id", Operator::Equals(Value::Int32(i)))]).unwrap();
+                }
+            })
+            .sqlite(|f| {
+                let tx = f.sqlite().unchecked_transaction().unwrap();
+                {
+                    let mut ins = tx.prepare("INSERT INTO blog_posts (id, author_id, title, content) VALUES (?1, ?2, ?3, ?4)").unwrap();
+                    for i in 10_001..=11_000 {
+                        ins.execute(params![i, (i % 5) + 1, format!("Mixed #{}", i), "Mixed body"]).unwrap();
+                    }
+                    let mut upd = tx.prepare("UPDATE blog_posts SET title = ?1 WHERE id = ?2").unwrap();
+                    for i in 1..=1000 {
+                        upd.execute(params![format!("Mixed-upd #{}", i), i]).unwrap();
+                    }
+                    let mut del = tx.prepare("DELETE FROM blog_posts WHERE id = ?1").unwrap();
+                    for i in 2001..=3000 { del.execute(params![i]).unwrap(); }
+                }
+                tx.commit().unwrap();
+            })
+            .assert(|f| {
+                // Re-apply Thunder mutations so both engines are in the same state.
+                let db = f.thunder_mut();
+                let new_rows: Vec<Vec<Value>> = (10_001..=11_000).map(|i| vec![
+                    Value::Int32(i), Value::Int32((i % 5) + 1),
+                    Value::varchar(format!("Mixed #{}", i)),
+                    Value::varchar("Mixed body"),
+                ]).collect();
+                db.insert_batch("blog_posts", new_rows).unwrap();
+                for i in 1..=1000 {
+                    db.update("blog_posts",
+                        vec![Filter::new("id", Operator::Equals(Value::Int32(i)))],
+                        vec![("title".into(), Value::varchar(format!("Mixed-upd #{}", i)))]).unwrap();
+                }
+                for i in 2001..=3000 {
+                    db.delete("blog_posts", vec![Filter::new("id", Operator::Equals(Value::Int32(i)))]).unwrap();
+                }
+                let tc = f.thunder_mut().count("blog_posts", vec![]).unwrap() as i64;
+                let sc: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts", [], |r| r.get(0)).unwrap();
+                if tc != sc { return Err(format!("W9 count drift: thunder={}, sqlite={}", tc, sc)); }
+                let st: String = f.sqlite().query_row("SELECT title FROM blog_posts WHERE id = 1", [], |r| r.get(0)).unwrap();
+                if st != "Mixed-upd #1" { return Err(format!("W9 update missing: sqlite={}", st)); }
+                Ok(())
+            })
+            .build(),
     ]
 }
 
