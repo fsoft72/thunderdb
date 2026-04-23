@@ -248,6 +248,32 @@ fn scenarios() -> Vec<Scenario> {
                 Ok(())
             })
             .build(),
+        // W6. UPDATE by indexed column — set all posts with author_id=3 to new title
+        Scenario::new("W6. UPDATE by indexed column", "write")
+            .setup(|t, m| { let mut f = build_blog_fixtures(t, m); f.snapshot_all().unwrap(); f })
+            .reset(|f| f.restore_all().map_err(|e| format!("restore: {}", e)))
+            .thunder(|f| {
+                f.thunder_mut().update("blog_posts",
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int32(3)))],
+                    vec![("title".into(), Value::varchar("bulk-updated"))]).unwrap();
+            })
+            .sqlite(|f| {
+                f.sqlite().execute("UPDATE blog_posts SET title = 'bulk-updated' WHERE author_id = 3", params![]).unwrap();
+            })
+            .assert(|f| {
+                // Re-apply Thunder update so both engines are in the same state.
+                f.thunder_mut().update("blog_posts",
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int32(3)))],
+                    vec![("title".into(), Value::varchar("bulk-updated"))]).unwrap();
+                let tc = f.thunder_mut().scan_with_projection("blog_posts",
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int32(3)))],
+                    None, None, Some(vec![2])).unwrap().len();
+                let sc: i64 = f.sqlite().query_row("SELECT COUNT(*) FROM blog_posts WHERE author_id = 3 AND title = 'bulk-updated'", [], |r| r.get(0)).unwrap();
+                if tc as i64 != sc {
+                    Err(format!("W6 mismatch: thunder matched={}, sqlite updated={}", tc, sc))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
