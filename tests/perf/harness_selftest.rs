@@ -133,3 +133,20 @@ fn snapshot_drop_cleans_tempdir() {
         "expected old snapshot dirs cleaned by Drop; before={}, after={}", before, after);
     drop_fixtures(f);
 }
+
+#[test]
+fn restore_all_preserves_cold_fadvise() {
+    use common::fixtures::{build_blog_fixtures, reopen_handles, drop_fixtures};
+    use common::fairness::{Tier, Durability};
+
+    let mut f = build_blog_fixtures(Tier::Small, Durability::Fast);
+    f.snapshot_all().unwrap();
+    // Mutate, restore, then reopen COLD — must not panic.
+    f.thunder_mut().delete("blog_posts", vec![]).unwrap();
+    f.restore_all().unwrap();
+    reopen_handles(&mut f).unwrap();
+    use thunderdb::DirectDataAccess;
+    let n = f.thunder_mut().count("blog_posts", vec![]).unwrap();
+    assert_eq!(n, Tier::Small.post_count());
+    drop_fixtures(f);
+}
