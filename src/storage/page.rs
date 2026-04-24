@@ -365,6 +365,41 @@ impl Page {
         true
     }
 
+    /// Overwrite a slot's data in-place when `new_data` fits within the existing slot length.
+    ///
+    /// Returns `true` if updated; `false` if `new_data.len()` exceeds the slot length,
+    /// the slot is freed, or `slot_index` is out of bounds.
+    /// Dead bytes at the tail are abandoned (no page compaction).
+    pub fn update_row_inplace(&mut self, slot_index: u16, new_data: &[u8]) -> bool {
+        if slot_index >= self.header.slot_count {
+            return false;
+        }
+
+        let slot_pos = PAGE_HEADER_SIZE + slot_index as usize * SLOT_SIZE;
+        let offset = u16::from_le_bytes(
+            self.data[slot_pos..slot_pos + 2].try_into().unwrap(),
+        );
+
+        if offset == INVALID_SLOT {
+            return false;
+        }
+
+        let old_len = u16::from_le_bytes(
+            self.data[slot_pos + 2..slot_pos + 4].try_into().unwrap(),
+        ) as usize;
+
+        if new_data.len() > old_len {
+            return false;
+        }
+
+        let start = offset as usize;
+        self.data[start..start + new_data.len()].copy_from_slice(new_data);
+        self.data[slot_pos + 2..slot_pos + 4]
+            .copy_from_slice(&(new_data.len() as u16).to_le_bytes());
+
+        true
+    }
+
     /// Extract a single column value from a row without full deserialization.
     ///
     /// Uses the column-offset array in the page row format (u16 col_count).
@@ -640,5 +675,48 @@ mod tests {
         let row = page.get_row(slot).unwrap();
         let col_count = u16::from_le_bytes(row[0..2].try_into().unwrap());
         assert_eq!(col_count, 0);
+    }
+
+    #[test]
+    fn test_update_inplace_fits() {
+        let mut page = Page::new(1);
+        let slot = page.insert_row(b"hello world").unwrap();
+        let updated = page.update_row_inplace(slot, b"hi!");
+        assert!(updated);
+        assert_eq!(page.get_row(slot).unwrap(), b"hi!" as &[u8]);
+        assert_eq!(page.active_count(), 1); // unchanged
+    }
+
+    #[test]
+    fn test_update_inplace_exact_size() {
+        let mut page = Page::new(1);
+        let slot = page.insert_row(b"abcde").unwrap();
+        let updated = page.update_row_inplace(slot, b"ABCDE");
+        assert!(updated);
+        assert_eq!(page.get_row(slot).unwrap(), b"ABCDE" as &[u8]);
+    }
+
+    #[test]
+    fn test_update_inplace_too_large() {
+        let mut page = Page::new(1);
+        let slot = page.insert_row(b"hi").unwrap();
+        let updated = page.update_row_inplace(slot, b"this is much larger than two bytes");
+        assert!(!updated);
+        // original data untouched
+        assert_eq!(page.get_row(slot).unwrap(), b"hi" as &[u8]);
+    }
+
+    #[test]
+    fn test_update_inplace_freed_slot() {
+        let mut page = Page::new(1);
+        let slot = page.insert_row(b"data").unwrap();
+        page.delete_row(slot);
+        assert!(!page.update_row_inplace(slot, b"new"));
+    }
+
+    #[test]
+    fn test_update_inplace_out_of_bounds() {
+        let mut page = Page::new(1);
+        assert!(!page.update_row_inplace(99, b"data"));
     }
 }
