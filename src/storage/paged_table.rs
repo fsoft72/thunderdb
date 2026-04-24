@@ -185,6 +185,58 @@ impl PagedTable {
         self.insert_row(values)
     }
 
+    /// Delete multiple rows grouped by page_id — one read+write per page.
+    ///
+    /// Returns the number of rows actually deleted (already-freed slots are skipped).
+    pub fn delete_batch(&mut self, ctids: &[Ctid]) -> Result<usize> {
+        if ctids.is_empty() {
+            return Ok(0);
+        }
+
+        // Group slot indices by page_id in sorted order for sequential I/O
+        let mut by_page: std::collections::BTreeMap<u32, Vec<u16>> =
+            std::collections::BTreeMap::new();
+        for ctid in ctids {
+            by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
+        }
+
+        let mut total_deleted = 0usize;
+
+        for (page_id, slots) in by_page {
+            if page_id >= self.page_file.page_count() {
+                continue;
+            }
+
+            let mut page = self.page_file.read_page(page_id)?;
+            let mut page_deleted = 0usize;
+
+            for slot in slots {
+                // Extract raw bytes before deleting the slot (needed for TOAST cleanup)
+                let raw = page.get_row(slot).map(|b| b.to_vec());
+
+                if let Some(ref raw_bytes) = raw {
+                    // Free any overflow pages referenced by TOAST pointers.
+                    // free_toast_data writes only to overflow pages (not this data page),
+                    // so `page` remains valid after the call.
+                    toast::free_toast_data(raw_bytes, &mut self.page_file)?;
+                }
+
+                if page.delete_row(slot) {
+                    page_deleted += 1;
+                }
+            }
+
+            if page_deleted > 0 {
+                self.page_file.write_page(&page)?;
+                self.page_file.update_fsm(page_id, page.free_space())?;
+                self.active_count -= page_deleted as u64;
+                total_deleted += page_deleted;
+            }
+        }
+
+        Ok(total_deleted)
+    }
+
     /// Scan all active rows in the table.
     ///
     /// Uses direct mmap access to avoid per-page 8KB copies and per-row
@@ -991,5 +1043,71 @@ mod tests {
         assert_eq!(seen[1], (2, large));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_batch_basic() {
+        let path = temp_path("test_delete_batch_basic.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let mut ctids = Vec::new();
+        for i in 0..10i32 {
+            ctids.push(pt.insert_row(&[Value::Int32(i)]).unwrap());
+        }
+        assert_eq!(pt.active_row_count(), 10);
+
+        let deleted = pt.delete_batch(&ctids[..5]).unwrap();
+        assert_eq!(deleted, 5);
+        assert_eq!(pt.active_row_count(), 5);
+
+        for ctid in &ctids[..5] {
+            assert!(pt.get_row(*ctid).unwrap().is_none());
+        }
+        for ctid in &ctids[5..] {
+            assert!(pt.get_row(*ctid).unwrap().is_some());
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_delete_batch_across_pages() {
+        let path = temp_path("test_delete_batch_pages.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let mut ctids = Vec::new();
+        for i in 0..200i32 {
+            ctids.push(pt.insert_row(&[Value::Int32(i), Value::varchar(format!("row_{:0>60}", i))]).unwrap());
+        }
+
+        let to_delete: Vec<Ctid> = ctids.iter().step_by(2).copied().collect();
+        let deleted = pt.delete_batch(&to_delete).unwrap();
+        assert_eq!(deleted, 100);
+        assert_eq!(pt.active_row_count(), 100);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_delete_batch_empty() {
+        let path = temp_path("test_delete_batch_empty.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+        let deleted = pt.delete_batch(&[]).unwrap();
+        assert_eq!(deleted, 0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_delete_batch_double_delete() {
+        let path = temp_path("test_delete_batch_double.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+        let ctid = pt.insert_row(&[Value::Int32(1)]).unwrap();
+        // Delete same ctid twice in one batch — second should be no-op
+        let deleted = pt.delete_batch(&[ctid, ctid]).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(pt.active_row_count(), 0);
+        cleanup(&path);
     }
 }
