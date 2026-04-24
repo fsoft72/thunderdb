@@ -293,10 +293,9 @@ impl PagedTable {
                 let (ctid, new_values) = &mutations[i];
                 let new_bytes = serialize_row_for_page(new_values);
 
-                // Determine old slot length from the in-memory page
-                let old_slot_len = page.get_row(ctid.slot_index)
-                    .map(|b| b.len())
-                    .unwrap_or(0);
+                // Read slot once: derive both old length and TOAST bytes.
+                let raw = page.get_row(ctid.slot_index).map(|b| b.to_vec());
+                let old_slot_len = raw.as_ref().map(|b| b.len()).unwrap_or(0);
 
                 // In-place is eligible when the new serialized row fits in the old slot
                 // and does not need TOAST (keeps the data page self-contained).
@@ -306,8 +305,8 @@ impl PagedTable {
 
                 // Free old TOAST overflow pages before overwriting or deleting the slot.
                 // free_toast_data only writes to overflow pages, leaving `page` valid.
-                if let Some(raw) = page.get_row(ctid.slot_index).map(|b| b.to_vec()) {
-                    toast::free_toast_data(&raw, &mut self.page_file)?;
+                if let Some(ref raw_bytes) = raw {
+                    toast::free_toast_data(raw_bytes, &mut self.page_file)?;
                 }
 
                 if can_inplace {
@@ -353,7 +352,11 @@ impl PagedTable {
             self.page_file.update_fsm(page_id, free_space)?;
         }
 
-        Ok(outcomes.into_iter().map(|o| o.unwrap()).collect())
+        outcomes.into_iter().enumerate().map(|(i, o)| {
+            o.ok_or_else(|| crate::error::Error::Storage(
+                format!("update_batch: no outcome recorded for mutation index {}", i)
+            ))
+        }).collect()
     }
 
     /// Scan all active rows in the table.
