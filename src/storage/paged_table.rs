@@ -19,6 +19,15 @@ const TOAST_THRESHOLD: usize = 2000;
 /// Type tag for a TOAST pointer (must match toast.rs).
 const TOAST_TAG: u8 = 0x07;
 
+/// Result of a single row mutation in `update_batch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchUpdateOutcome {
+    /// Row was overwritten in its existing slot; ctid is unchanged.
+    InPlace(Ctid),
+    /// Row did not fit in the old slot; old slot was freed and a new one allocated.
+    Relocated(Ctid),
+}
+
 /// Page-based table storage with automatic TOAST support.
 ///
 /// Manages rows across slotted pages, tracking active row count and
@@ -235,6 +244,116 @@ impl PagedTable {
         }
 
         Ok(total_deleted)
+    }
+
+    /// Update multiple rows grouped by page_id — one read+write per page.
+    ///
+    /// Tries in-place overwrite (new serialized bytes ≤ old slot length and
+    /// ≤ TOAST_THRESHOLD). Rows that do not fit are deleted from their page
+    /// and batch-inserted at the end via `insert_batch`.
+    ///
+    /// Returns one `BatchUpdateOutcome` per input mutation, in the same order.
+    pub fn update_batch(
+        &mut self,
+        mutations: &[(Ctid, Vec<Value>)],
+    ) -> Result<Vec<BatchUpdateOutcome>> {
+        if mutations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut outcomes: Vec<Option<BatchUpdateOutcome>> = vec![None; mutations.len()];
+
+        // Group mutation indices by page_id (sorted for sequential I/O)
+        let mut by_page: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (i, (ctid, _)) in mutations.iter().enumerate() {
+            by_page.entry(ctid.page_id).or_default().push(i);
+        }
+
+        let mut relocate_indices: Vec<usize> = Vec::new();
+        // Track pages that had rows deleted so we can update their FSM
+        // *after* insert_batch — preventing the freed slots from being
+        // reclaimed by the relocation inserts (which would produce the
+        // same ctid as the deleted row, violating the Relocated contract).
+        let mut deferred_fsm: Vec<(u32, usize)> = Vec::new();
+
+        for (page_id, indices) in &by_page {
+            let page_id = *page_id;
+            if page_id >= self.page_file.page_count() {
+                // Page doesn't exist; all mutations for it must relocate
+                for &i in indices {
+                    relocate_indices.push(i);
+                }
+                continue;
+            }
+
+            let mut page = self.page_file.read_page(page_id)?;
+            let mut n_deleted = 0usize;
+
+            for &i in indices {
+                let (ctid, new_values) = &mutations[i];
+                let new_bytes = serialize_row_for_page(new_values);
+
+                // Determine old slot length from the in-memory page
+                let old_slot_len = page.get_row(ctid.slot_index)
+                    .map(|b| b.len())
+                    .unwrap_or(0);
+
+                // In-place is eligible when the new serialized row fits in the old slot
+                // and does not need TOAST (keeps the data page self-contained).
+                let can_inplace = old_slot_len > 0
+                    && new_bytes.len() <= old_slot_len
+                    && new_bytes.len() <= TOAST_THRESHOLD;
+
+                // Free old TOAST overflow pages before overwriting or deleting the slot.
+                // free_toast_data only writes to overflow pages, leaving `page` valid.
+                if let Some(raw) = page.get_row(ctid.slot_index).map(|b| b.to_vec()) {
+                    toast::free_toast_data(&raw, &mut self.page_file)?;
+                }
+
+                if can_inplace {
+                    page.update_row_inplace(ctid.slot_index, &new_bytes);
+                    outcomes[i] = Some(BatchUpdateOutcome::InPlace(*ctid));
+                } else {
+                    page.delete_row(ctid.slot_index);
+                    n_deleted += 1;
+                    relocate_indices.push(i);
+                }
+            }
+
+            self.page_file.write_page(&page)?;
+            if n_deleted > 0 {
+                // Hide freed space from the FSM so insert_batch cannot reclaim
+                // freed slots, which would produce duplicate ctids for the
+                // Relocated variant.  We record the actual free space and
+                // publish it after insert_batch completes.
+                self.page_file.update_fsm(page_id, 0)?;
+                deferred_fsm.push((page_id, page.free_space()));
+                self.active_count -= n_deleted as u64;
+            } else {
+                // No deletions on this page — FSM update is safe immediately.
+                self.page_file.update_fsm(page_id, page.free_space())?;
+            }
+        }
+
+        // Batch-insert all rows that could not be updated in-place.
+        // Runs before deferred FSM updates so freed slots are invisible.
+        if !relocate_indices.is_empty() {
+            let reloc_values: Vec<Vec<Value>> = relocate_indices.iter()
+                .map(|&i| mutations[i].1.clone())
+                .collect();
+            let new_ctids = self.insert_batch(&reloc_values)?;
+            for (&i, &new_ctid) in relocate_indices.iter().zip(new_ctids.iter()) {
+                outcomes[i] = Some(BatchUpdateOutcome::Relocated(new_ctid));
+            }
+        }
+
+        // Restore the correct FSM entries for pages whose freed slots are
+        // now safely unreachable (relocation inserts went elsewhere).
+        for (page_id, free_space) in deferred_fsm {
+            self.page_file.update_fsm(page_id, free_space)?;
+        }
+
+        Ok(outcomes.into_iter().map(|o| o.unwrap()).collect())
     }
 
     /// Scan all active rows in the table.
@@ -1108,6 +1227,96 @@ mod tests {
         let deleted = pt.delete_batch(&[ctid, ctid]).unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(pt.active_row_count(), 0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_update_batch_all_inplace() {
+        let path = temp_path("test_update_batch_inplace.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let mut ctids = Vec::new();
+        for i in 0..5i32 {
+            ctids.push(pt.insert_row(&[Value::Int32(i), Value::Int32(100)]).unwrap());
+        }
+
+        // Same-size update: Int32 -> Int32, all should be in-place
+        let mutations: Vec<(Ctid, Vec<Value>)> = ctids.iter().enumerate()
+            .map(|(i, &ctid)| (ctid, vec![Value::Int32(i as i32 * 10), Value::Int32(200)]))
+            .collect();
+        let outcomes = pt.update_batch(&mutations).unwrap();
+
+        for (i, outcome) in outcomes.iter().enumerate() {
+            match outcome {
+                BatchUpdateOutcome::InPlace(ctid) => assert_eq!(*ctid, ctids[i]),
+                BatchUpdateOutcome::Relocated(_) => panic!("expected in-place for row {}", i),
+            }
+        }
+        assert_eq!(pt.active_row_count(), 5);
+
+        // Verify updated values
+        for (i, &ctid) in ctids.iter().enumerate() {
+            let row = pt.get_row(ctid).unwrap().unwrap();
+            assert_eq!(row.values[0], Value::Int32(i as i32 * 10));
+            assert_eq!(row.values[1], Value::Int32(200));
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_update_batch_all_relocate() {
+        let path = temp_path("test_update_batch_relocate.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let ctid = pt.insert_row(&[Value::Int32(1)]).unwrap();
+
+        // New row is larger than old: forces relocation
+        let large_val = "x".repeat(500);
+        let mutations = vec![(ctid, vec![Value::Int32(1), Value::varchar(large_val.clone())])];
+        let outcomes = pt.update_batch(&mutations).unwrap();
+
+        match outcomes[0] {
+            BatchUpdateOutcome::Relocated(new_ctid) => {
+                assert_ne!(new_ctid, ctid);
+                let row = pt.get_row(new_ctid).unwrap().unwrap();
+                assert_eq!(row.values[1], Value::varchar(large_val));
+            }
+            BatchUpdateOutcome::InPlace(_) => panic!("expected relocation"),
+        }
+        assert_eq!(pt.active_row_count(), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_update_batch_empty() {
+        let path = temp_path("test_update_batch_empty.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+        let outcomes = pt.update_batch(&[]).unwrap();
+        assert!(outcomes.is_empty());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_update_batch_active_count_stable() {
+        let path = temp_path("test_update_batch_count.pages");
+        cleanup(&path);
+        let mut pt = PagedTable::open(&path).unwrap();
+
+        let mut ctids = Vec::new();
+        for i in 0..10i32 {
+            ctids.push(pt.insert_row(&[Value::Int32(i)]).unwrap());
+        }
+        assert_eq!(pt.active_row_count(), 10);
+
+        let mutations: Vec<(Ctid, Vec<Value>)> = ctids.iter()
+            .map(|&ctid| (ctid, vec![Value::Int32(999)]))
+            .collect();
+        pt.update_batch(&mutations).unwrap();
+
+        assert_eq!(pt.active_row_count(), 10); // must be stable
         cleanup(&path);
     }
 }
