@@ -1,5 +1,31 @@
 # ThunderDB Changes
 
+## 2026-04-24 - SP3b: Write-path optimization
+
+Fourth sub-project in the "faster than SQLite in all benchmarks" program. Addresses the architectural write-path gaps identified in SP3 (append-only mutation, per-row index maintenance).
+
+- **In-place page update**: `Page::update_row_inplace` — overwrites a slot in-place when new bytes fit in the existing slot, avoiding a delete+insert cycle and the associated double read-then-write. Zero-length guard prevents corrupt slots.
+- **Batch page delete** (`PagedTable::delete_batch`): groups deletes by page_id, one read+write per page instead of N. Also handles TOAST cleanup in a single page scan.
+- **Batch page update** (`PagedTable::update_batch`): groups updates by page_id. Attempts in-place overwrite per slot; rows that don't fit are collected and re-inserted in a single `insert_batch`. Returns per-row `BatchUpdateOutcome` (InPlace/Relocated) for index maintenance.
+- **Batch index delete** (`IndexManager::delete_rows_batch`): collects all (value, row_id) pairs per indexed column, sorts by key for B-tree traversal locality, then deletes in one pass. Mirrors `insert_rows_batch`.
+- **Batch TableEngine delete** (`TableEngine::delete_batch`): single `PagedTable::delete_batch` call, then one `IndexManager::delete_rows_batch`. Replaces N per-row `paged_table.delete_row` calls.
+- **Batch TableEngine update** (`TableEngine::update_batch`): single `PagedTable::update_batch` call, then deferred index maintenance — skip index update if in-place AND no indexed column changed. Replaces N per-row `paged_table.update_row` calls.
+- **lib.rs wiring**: `db.update()` and `db.delete()` now collect all matching rows via a single scan, then call `update_batch` / `delete_batch`. Eliminates per-row mmap `sync_all` calls inside mutation loops.
+- **Index persistence fix** (`TableEngine::create_index`): `create_index` now calls `index_manager.save_to()` for file-backed tables so `.idx` files survive a close/reopen cycle. Previously, after `snapshot_all` + `restore_all`, no index files were present → every update/delete fell back to O(N) sequential scan. Root cause of the SP3b regression (W5=32s, W7=17s, W9=6s).
+- **B-tree delete fix** (`BTree::delete`): `delete()` previously used `find_leaf()` (navigates rightward to the rightmost leaf for a duplicate key). With 2000+ entries per key, entries span many leaves; the delete only searched the rightmost leaf, leaving stale entries for all others. Fixed by using `find_first_leaf()` and walking the leaf chain forward. Stop condition: only stop when the current leaf's last key is strictly greater than the target (empty leaves or last-key-less-than-target may be followed by leaves that contain the target). Fixes W6 correctness — thunder count now matches SQLite for bulk updates on non-unique indexed columns.
+- **FAST/WARM ratios (SMALL tier) — before vs after SP3b**:
+
+  | Scenario | SP3 (baseline) | SP3b | Improvement |
+  |---|---|---|---|
+  | W5. UPDATE 10k by PK | 1471 ms / 140x Loss | 108 ms / 10.8x Loss | **13.6x faster** |
+  | W7. DELETE 10k by PK | 795 ms / 103x Loss | 63 ms / 8.6x Loss | **12.7x faster** |
+  | W9. Mixed INSERT+UPDATE+DELETE | 291 ms / 98x Loss | 34 ms / 11.1x Loss | **8.6x faster** |
+
+  Insert-only scenarios (W1–W4) and W8 (range delete) are unchanged. W6 moved from Failure (correctness bug) to Loss (correct, slower than SQLite due to B-tree traversal overhead for bulk non-unique-key updates).
+
+Spec: `docs/superpowers/specs/2026-04-24-sp3b-write-path-optimization-design.md`
+Plan: `docs/superpowers/plans/2026-04-24-sp3b-write-path-optimization.md`
+
 ## 2026-04-23 - SP3: Write-path benchmarks
 
 Third sub-project in the "faster than SQLite in all benchmarks" program. Adds write-path coverage and surfaces honest data on Thunder's mutation hot spots.
