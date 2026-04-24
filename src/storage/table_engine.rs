@@ -381,6 +381,12 @@ impl TableEngine {
             return Ok(0);
         }
 
+        // Single-row fast path: avoid batch infrastructure overhead
+        if deletions.len() == 1 {
+            let (row_id, old_values) = &deletions[0];
+            return self._delete_with_old_values(*row_id, old_values.clone()).map(|_| 1);
+        }
+
         let ctids: Vec<Ctid> = deletions.iter()
             .map(|(row_id, _)| Ctid::from_u64(*row_id))
             .collect();
@@ -412,6 +418,13 @@ impl TableEngine {
     ) -> Result<usize> {
         if updates.is_empty() {
             return Ok(0);
+        }
+
+        // Single-row fast path: avoid batch infrastructure overhead
+        if updates.len() == 1 {
+            let (row_id, old_values, new_values) = &updates[0];
+            self._update_row_with_old(*row_id, old_values.clone(), new_values.clone())?;
+            return Ok(1);
         }
 
         let mutations: Vec<(crate::storage::page::Ctid, Vec<Value>)> = updates.iter()
@@ -686,6 +699,15 @@ impl TableEngine {
         if !rows.is_empty() {
             let mapping = self.build_column_mapping();
             self.index_manager.rebuild_index(column_name, &rows, &mapping)?;
+        }
+
+        // Persist the new index so it survives a close/reopen cycle.
+        if !self.config.in_memory {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let index_dir = self.table_dir.join("indices");
+                self.index_manager.save_to(&index_dir)?;
+            }
         }
 
         Ok(())

@@ -998,4 +998,61 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("thunderdb_mem_batch_del_t2"));
     }
+
+    #[test]
+    fn timing_w5_disk_with_persisted_index() {
+        use crate::storage::table_engine::{ColumnInfo, TableSchema};
+        let dir = std::env::temp_dir().join("thunderdb_w5_disk_idx");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        {
+            let mut db = Database::open(&dir).unwrap();
+            let n = 10_000i32;
+            let posts: Vec<Vec<Value>> = (1..=n).map(|i| vec![
+                Value::Int32(i),
+                Value::Int32((i % 50) + 1),
+                Value::varchar(format!("Post about Rust #{}", i)),
+                Value::varchar(format!("This is post {} discussing Rust in depth. ThunderDB makes Rust easy.", i)),
+            ]).collect();
+            db.insert_batch("blog_posts", posts).unwrap();
+            {
+                let tbl = db.get_table_mut("blog_posts").unwrap();
+                tbl.set_schema(TableSchema { columns: vec![
+                    ColumnInfo { name: "id".into(),        data_type: "INT32".into() },
+                    ColumnInfo { name: "author_id".into(), data_type: "INT32".into() },
+                    ColumnInfo { name: "title".into(),     data_type: "VARCHAR".into() },
+                    ColumnInfo { name: "content".into(),   data_type: "VARCHAR".into() },
+                ]}).unwrap();
+                tbl.create_index("id").unwrap();
+                tbl.create_index("author_id").unwrap();
+                tbl.create_index("title").unwrap();
+            }
+        } // drop db — index files should be persisted
+
+        // Verify index files exist
+        let idx_dir = dir.join("blog_posts").join("indices");
+        let idx_count = std::fs::read_dir(&idx_dir).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("idx"))
+            .count();
+        assert_eq!(idx_count, 3, "3 index files must be persisted");
+
+        // Reopen like restore_all does — indices should load
+        let mut db = Database::open(&dir).unwrap();
+        let _ = db.count("blog_posts", vec![]).unwrap();
+
+        let n = 10_000i32;
+        let t0 = std::time::Instant::now();
+        for i in 1..=n {
+            db.update("blog_posts",
+                vec![Filter::new("id", Operator::Equals(Value::Int32(i)))],
+                vec![("title".into(), Value::varchar(format!("Updated #{}", i)))]).unwrap();
+        }
+        let elapsed = t0.elapsed();
+        let ms_per_op = elapsed.as_millis() as f64 / n as f64;
+        eprintln!("{} W5 disk+persisted-index: {:?} = {:.3}ms/op", n, elapsed, ms_per_op);
+        assert!(ms_per_op < 1.0, "W5 with persisted index should be < 1ms/op, got {:.3}", ms_per_op);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
