@@ -371,6 +371,10 @@ impl Page {
     /// the slot is freed, or `slot_index` is out of bounds.
     /// Dead bytes at the tail are abandoned (no page compaction).
     pub fn update_row_inplace(&mut self, slot_index: u16, new_data: &[u8]) -> bool {
+        if new_data.is_empty() {
+            return false;
+        }
+
         if slot_index >= self.header.slot_count {
             return false;
         }
@@ -718,5 +722,14 @@ mod tests {
     fn test_update_inplace_out_of_bounds() {
         let mut page = Page::new(1);
         assert!(!page.update_row_inplace(99, b"data"));
+    }
+
+    #[test]
+    fn test_update_inplace_empty_data() {
+        let mut page = Page::new(1);
+        let slot = page.insert_row(b"hello").unwrap();
+        assert!(!page.update_row_inplace(slot, b""));
+        // original data untouched
+        assert_eq!(page.get_row(slot).unwrap(), b"hello" as &[u8]);
     }
 }
