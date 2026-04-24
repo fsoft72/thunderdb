@@ -219,7 +219,7 @@ impl IndexManager {
             return Ok(());
         }
 
-        for column_name in &self.indexed_columns.clone() {
+        for column_name in &self.indexed_columns {
             if let Some(&col_idx) = column_mapping.get(column_name) {
                 let mut entries: Vec<(Value, u64)> = Vec::with_capacity(deletions.len());
                 for (row_id, values) in deletions {
