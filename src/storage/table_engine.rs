@@ -395,6 +395,75 @@ impl TableEngine {
         Ok(deleted)
     }
 
+    /// Update multiple rows in batch with smart index skip.
+    ///
+    /// Uses `PagedTable::update_batch` for page-level I/O efficiency.
+    /// Index maintenance is skipped for rows where all indexed column values
+    /// are unchanged and the row was updated in-place (same row_id).
+    ///
+    /// # Arguments
+    /// * `updates` - (row_id, old_values, new_values) triples
+    ///
+    /// # Returns
+    /// Number of rows processed
+    pub fn update_batch(
+        &mut self,
+        updates: &[(u64, Vec<Value>, Vec<Value>)],
+    ) -> Result<usize> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let mutations: Vec<(crate::storage::page::Ctid, Vec<Value>)> = updates.iter()
+            .map(|(row_id, _, new_values)| {
+                (crate::storage::page::Ctid::from_u64(*row_id), new_values.clone())
+            })
+            .collect();
+
+        let outcomes = self.paged_table.update_batch(&mutations)?;
+
+        if !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
+            let indexed_cols: Vec<String> = self.index_manager.indexed_columns().to_vec();
+
+            let mut index_deletes: Vec<(u64, Vec<Value>)> = Vec::new();
+            let mut index_inserts: Vec<crate::storage::Row> = Vec::new();
+
+            for (i, (row_id, old_values, new_values)) in updates.iter().enumerate() {
+                let outcome = &outcomes[i];
+                let new_row_id = match outcome {
+                    crate::storage::paged_table::BatchUpdateOutcome::InPlace(ctid) => ctid.to_u64(),
+                    crate::storage::paged_table::BatchUpdateOutcome::Relocated(ctid) => ctid.to_u64(),
+                };
+                let is_inplace = matches!(
+                    outcome,
+                    crate::storage::paged_table::BatchUpdateOutcome::InPlace(_)
+                );
+
+                // Skip index maintenance only when: in-place AND no indexed column changed
+                let needs_index_update = !is_inplace || indexed_cols.iter().any(|col_name| {
+                    if let Some(&col_idx) = mapping.get(col_name) {
+                        old_values.get(col_idx) != new_values.get(col_idx)
+                    } else {
+                        false
+                    }
+                });
+
+                if needs_index_update {
+                    index_deletes.push((*row_id, old_values.clone()));
+                    index_inserts.push(crate::storage::Row::new(new_row_id, new_values.clone()));
+                }
+            }
+
+            if !index_deletes.is_empty() {
+                self.index_manager.delete_rows_batch(&index_deletes, &mapping)?;
+                self.index_manager.insert_rows_batch(&index_inserts, &mapping)?;
+            }
+        }
+
+        Ok(updates.len())
+    }
+
     /// Delete a row by ID
     ///
     /// Reads the row before deleting so we can remove it from indices.
@@ -957,6 +1026,103 @@ mod tests {
     fn test_engine_delete_batch_empty() {
         let mut table = create_test_table("te_delete_batch_empty");
         let count = table.delete_batch(&[]).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_engine_update_batch_no_index() {
+        let mut table = create_test_table("te_update_batch_noidx");
+
+        let mut ids = Vec::new();
+        for i in 0..5i32 {
+            ids.push(table.insert_row(vec![Value::Int32(i), Value::Int32(0)]).unwrap());
+        }
+
+        let updates: Vec<(u64, Vec<Value>, Vec<Value>)> = ids.iter().enumerate()
+            .map(|(i, &id)| (id,
+                vec![Value::Int32(i as i32), Value::Int32(0)],
+                vec![Value::Int32(i as i32), Value::Int32(99)],
+            ))
+            .collect();
+
+        let count = table.update_batch(&updates).unwrap();
+        assert_eq!(count, 5);
+        assert_eq!(table.active_row_count(), 5);
+
+        // Verify via scan
+        let rows = table.scan_all().unwrap();
+        let mut vals: Vec<i32> = rows.iter().map(|r| {
+            if let Value::Int32(v) = r.values[1] { v } else { panic!() }
+        }).collect();
+        vals.sort();
+        assert!(vals.iter().all(|&v| v == 99));
+    }
+
+    #[test]
+    fn test_engine_update_batch_with_index_skip() {
+        let mut table = create_test_table("te_update_batch_skip");
+
+        table.set_schema(TableSchema {
+            columns: vec![
+                ColumnInfo { name: "id".to_string(), data_type: "INT".to_string() },
+                ColumnInfo { name: "content".to_string(), data_type: "VARCHAR".to_string() },
+            ],
+        }).unwrap();
+        table.create_index("id").unwrap();
+
+        let mut ids = Vec::new();
+        for i in 0..5i32 {
+            ids.push(table.insert_row(vec![Value::Int32(i), Value::varchar("old")]).unwrap());
+        }
+
+        // Update non-indexed `content` column only — id unchanged
+        let updates: Vec<(u64, Vec<Value>, Vec<Value>)> = ids.iter().enumerate()
+            .map(|(i, &id)| (id,
+                vec![Value::Int32(i as i32), Value::varchar("old")],
+                vec![Value::Int32(i as i32), Value::varchar("new")],
+            ))
+            .collect();
+
+        let count = table.update_batch(&updates).unwrap();
+        assert_eq!(count, 5);
+
+        // Index still returns correct rows (id values unchanged, index must be intact)
+        for i in 0..5i32 {
+            let found = table.search_by_index("id", &Value::Int32(i)).unwrap();
+            assert_eq!(found.len(), 1, "id {} should still be indexed", i);
+        }
+    }
+
+    #[test]
+    fn test_engine_update_batch_indexed_col_changes() {
+        let mut table = create_test_table("te_update_batch_idxchange");
+
+        table.set_schema(TableSchema {
+            columns: vec![
+                ColumnInfo { name: "id".to_string(), data_type: "INT".to_string() },
+            ],
+        }).unwrap();
+        table.create_index("id").unwrap();
+
+        let id = table.insert_row(vec![Value::Int32(1)]).unwrap();
+
+        // Update the indexed column: old=1, new=999
+        let updates = vec![(id,
+            vec![Value::Int32(1)],
+            vec![Value::Int32(999)],
+        )];
+        table.update_batch(&updates).unwrap();
+
+        // Old index entry must be gone
+        assert!(table.search_by_index("id", &Value::Int32(1)).unwrap().is_empty());
+        // New index entry must exist
+        assert_eq!(table.search_by_index("id", &Value::Int32(999)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_engine_update_batch_empty() {
+        let mut table = create_test_table("te_update_batch_empty");
+        let count = table.update_batch(&[]).unwrap();
         assert_eq!(count, 0);
     }
 
