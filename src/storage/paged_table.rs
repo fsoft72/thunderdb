@@ -10,6 +10,7 @@ use crate::storage::page_file::PageFile;
 use crate::storage::toast;
 use crate::storage::value::Value;
 use crate::storage::row::Row;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Rows larger than this (serialized bytes) trigger TOAST.
@@ -194,8 +195,7 @@ impl PagedTable {
         }
 
         // Group slot indices by page_id in sorted order for sequential I/O
-        let mut by_page: std::collections::BTreeMap<u32, Vec<u16>> =
-            std::collections::BTreeMap::new();
+        let mut by_page: BTreeMap<u32, Vec<u16>> = BTreeMap::new();
         for ctid in ctids {
             by_page.entry(ctid.page_id).or_default().push(ctid.slot_index);
         }
