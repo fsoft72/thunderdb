@@ -613,9 +613,8 @@ impl DirectDataAccess for Database {
         updates: Vec<(String, Value)>,
     ) -> Result<usize> {
         // Collect matching rows in a single scan pass (keep full Row data).
-        // Rows already carry old values — we pass them to _update_row_with_old
-        // to avoid a redundant get_row read inside TableEngine (which would
-        // trigger an mmap sync_all after every write).
+        // Rows already carry old values — build the full batch before handing
+        // off to update_batch, avoiding redundant per-row mmap sync_all calls.
         let rows = self.scan(table, filters)?;
 
         if rows.is_empty() {
@@ -624,9 +623,8 @@ impl DirectDataAccess for Database {
 
         let table_engine = self.get_table_mut(table)?;
         let column_mapping = table_engine.build_column_mapping();
-        let count = rows.len();
 
-        for row in rows {
+        let batch: Vec<(u64, Vec<Value>, Vec<Value>)> = rows.into_iter().map(|row| {
             let old_values = row.values.clone();
             let mut new_values = row.values;
 
@@ -647,17 +645,18 @@ impl DirectDataAccess for Database {
                 }
             }
 
-            table_engine._update_row_with_old(row.row_id, old_values, new_values)?;
-        }
+            (row.row_id, old_values, new_values)
+        }).collect();
 
+        let count = batch.len();
+        table_engine.update_batch(&batch)?;
         Ok(count)
     }
 
     fn delete(&mut self, table: &str, filters: Vec<Filter>) -> Result<usize> {
         // Collect matching rows in a single scan pass.
-        // Rows already carry old values — we pass them to _delete_with_old_values
-        // to avoid a redundant get_row read inside TableEngine (which would
-        // trigger an mmap sync_all after every write when the table has indices).
+        // Rows already carry old values — build the full batch before handing
+        // off to delete_batch, avoiding redundant per-row mmap sync_all calls.
         let rows = self.scan(table, filters)?;
 
         if rows.is_empty() {
@@ -666,10 +665,12 @@ impl DirectDataAccess for Database {
 
         let count = rows.len();
         let table_engine = self.get_table_mut(table)?;
-        for row in rows {
-            table_engine._delete_with_old_values(row.row_id, row.values)?;
-        }
 
+        let deletions: Vec<(u64, Vec<Value>)> = rows.into_iter()
+            .map(|r| (r.row_id, r.values))
+            .collect();
+
+        table_engine.delete_batch(&deletions)?;
         Ok(count)
     }
 
@@ -935,5 +936,66 @@ mod tests {
         assert!(matches!(r, Err(Error::InvalidOperation(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_batch_update_via_sql() {
+        use crate::storage::table_engine::{ColumnInfo, TableSchema};
+
+        // Clean up any leftover temp state from prior runs (open_in_memory uses tmp dir by table name)
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("thunderdb_mem_batch_upd_t"));
+
+        let mut db = Database::open_in_memory().unwrap();
+        // Insert 20 rows: (i, 0)
+        let rows_data: Vec<Vec<Value>> = (0..20i32)
+            .map(|i| vec![Value::Int32(i), Value::Int32(0)])
+            .collect();
+        db.insert_batch("batch_upd_t", rows_data).unwrap();
+        {
+            let tbl = db.get_table_mut("batch_upd_t").unwrap();
+            tbl.set_schema(TableSchema { columns: vec![
+                ColumnInfo { name: "id".into(), data_type: "INT".into() },
+                ColumnInfo { name: "val".into(), data_type: "INT".into() },
+            ]}).unwrap();
+        }
+        // Update all rows: SET val = 99
+        let updated = db.update("batch_upd_t", vec![], vec![("val".to_string(), Value::Int32(99))]).unwrap();
+        assert_eq!(updated, 20);
+        let rows = db.scan("batch_upd_t", vec![]).unwrap();
+        assert_eq!(rows.len(), 20);
+        assert!(rows.iter().all(|r| r.values[1] == Value::Int32(99)));
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("thunderdb_mem_batch_upd_t"));
+    }
+
+    #[test]
+    fn test_batch_delete_via_sql() {
+        use crate::storage::table_engine::{ColumnInfo, TableSchema};
+
+        // Clean up any leftover temp state from prior runs (open_in_memory uses tmp dir by table name)
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("thunderdb_mem_batch_del_t2"));
+
+        let mut db = Database::open_in_memory().unwrap();
+        // Insert 20 rows: (i, i)
+        let rows_data: Vec<Vec<Value>> = (0..20i32)
+            .map(|i| vec![Value::Int32(i), Value::Int32(i)])
+            .collect();
+        db.insert_batch("batch_del_t2", rows_data).unwrap();
+        {
+            let tbl = db.get_table_mut("batch_del_t2").unwrap();
+            tbl.set_schema(TableSchema { columns: vec![
+                ColumnInfo { name: "id".into(), data_type: "INT".into() },
+                ColumnInfo { name: "val".into(), data_type: "INT".into() },
+            ]}).unwrap();
+        }
+        // DELETE FROM batch_del_t2 WHERE val >= 10
+        let deleted = db.delete("batch_del_t2", vec![
+            Filter::new("val", Operator::GreaterThanOrEqual(Value::Int32(10))),
+        ]).unwrap();
+        assert_eq!(deleted, 10);
+        let rows = db.scan("batch_del_t2", vec![]).unwrap();
+        assert_eq!(rows.len(), 10);
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("thunderdb_mem_batch_del_t2"));
     }
 }
