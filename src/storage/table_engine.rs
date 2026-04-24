@@ -366,6 +366,35 @@ impl TableEngine {
         Ok(true)
     }
 
+    /// Delete multiple rows in batch.
+    ///
+    /// Uses `PagedTable::delete_batch` for page-level I/O efficiency, then
+    /// removes all index entries via `IndexManager::delete_rows_batch`.
+    ///
+    /// # Arguments
+    /// * `deletions` - (row_id, old_values) pairs; old_values are used for index cleanup
+    ///
+    /// # Returns
+    /// Number of rows actually deleted
+    pub fn delete_batch(&mut self, deletions: &[(u64, Vec<Value>)]) -> Result<usize> {
+        if deletions.is_empty() {
+            return Ok(0);
+        }
+
+        let ctids: Vec<Ctid> = deletions.iter()
+            .map(|(row_id, _)| Ctid::from_u64(*row_id))
+            .collect();
+
+        let deleted = self.paged_table.delete_batch(&ctids)?;
+
+        if deleted > 0 && !self.index_manager.indexed_columns().is_empty() {
+            let mapping = self.build_column_mapping();
+            self.index_manager.delete_rows_batch(deletions, &mapping)?;
+        }
+
+        Ok(deleted)
+    }
+
     /// Delete a row by ID
     ///
     /// Reads the row before deleting so we can remove it from indices.
@@ -860,6 +889,75 @@ mod tests {
         let stats = table.stats();
         assert_eq!(stats.name, "test_stats");
         assert_eq!(stats.active_rows, 9);
+    }
+
+    #[test]
+    fn test_engine_delete_batch_no_index() {
+        let mut table = create_test_table("te_delete_batch_noidx");
+        let mut ids = Vec::new();
+        for i in 0..10i32 {
+            ids.push(table.insert_row(vec![Value::Int32(i)]).unwrap());
+        }
+
+        let deletions: Vec<(u64, Vec<Value>)> = ids[..5].iter()
+            .enumerate()
+            .map(|(i, &id)| (id, vec![Value::Int32(i as i32)]))
+            .collect();
+        let count = table.delete_batch(&deletions).unwrap();
+
+        assert_eq!(count, 5);
+        assert_eq!(table.active_row_count(), 5);
+        for &id in &ids[..5] {
+            assert!(table.get_by_id(id).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn test_engine_delete_batch_with_index() {
+        let mut table = create_test_table("te_delete_batch_idx");
+
+        // Set schema so IndexManager can find columns by name
+        table.set_schema(TableSchema {
+            columns: vec![
+                ColumnInfo { name: "id".to_string(), data_type: "INT".to_string() },
+                ColumnInfo { name: "name".to_string(), data_type: "VARCHAR".to_string() },
+            ],
+        }).unwrap();
+        table.create_index("id").unwrap();
+
+        let mut ids = Vec::new();
+        let mut values_map = Vec::new();
+        for i in 0..5i32 {
+            let vals = vec![Value::Int32(i), Value::varchar(format!("user_{}", i))];
+            ids.push(table.insert_row(vals.clone()).unwrap());
+            values_map.push(vals);
+        }
+
+        // Delete rows 1 and 3
+        let deletions = vec![
+            (ids[1], values_map[1].clone()),
+            (ids[3], values_map[3].clone()),
+        ];
+        let count = table.delete_batch(&deletions).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(table.active_row_count(), 3);
+
+        // Index must no longer return deleted rows
+        let found = table.search_by_index("id", &Value::Int32(1)).unwrap();
+        assert!(found.is_empty());
+        let found = table.search_by_index("id", &Value::Int32(3)).unwrap();
+        assert!(found.is_empty());
+
+        // Surviving rows still in index
+        let found = table.search_by_index("id", &Value::Int32(0)).unwrap();
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn test_engine_delete_batch_empty() {
+        let mut table = create_test_table("te_delete_batch_empty");
+        let count = table.delete_batch(&[]).unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
