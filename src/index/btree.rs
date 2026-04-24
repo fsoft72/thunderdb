@@ -478,22 +478,46 @@ where
     /// # Returns
     /// `true` if the pair was found and removed, `false` otherwise
     pub fn delete(&mut self, key: &K, value: &V) -> bool {
-        let leaf_id = self.find_leaf(key);
-        let leaf = &mut self.nodes[leaf_id as usize];
+        // Must use find_first_leaf (not find_leaf) and scan the entire
+        // leaf chain for duplicate keys: find_leaf goes rightmost, but the
+        // target (key, value) pair may be in any leaf that holds key.
+        let mut current_id = self.find_first_leaf(key);
 
-        // Scan for matching key+value pair
-        for i in 0..leaf.keys.len() {
-            if leaf.keys[i].cmp(key) == std::cmp::Ordering::Equal
-                && leaf.values[i] == *value
-            {
-                leaf.keys.remove(i);
-                leaf.values.remove(i);
+        loop {
+            // Scan current leaf for matching (key, value) pair.
+            let found = {
+                let leaf = &self.nodes[current_id as usize];
+                (0..leaf.keys.len()).find(|&i| {
+                    leaf.keys[i].cmp(key) == std::cmp::Ordering::Equal
+                        && leaf.values[i] == *value
+                })
+            };
+
+            if let Some(pos) = found {
+                let leaf = &mut self.nodes[current_id as usize];
+                leaf.keys.remove(pos);
+                leaf.values.remove(pos);
                 self.entry_count -= 1;
                 return true;
             }
-        }
 
-        false
+            // Advance to next leaf.
+            // Stop only when the last key in the current leaf is strictly greater
+            // than the target: an empty leaf or a leaf whose last key < target
+            // may be followed by leaves that contain the target key.
+            let next = {
+                let leaf = &self.nodes[current_id as usize];
+                match leaf.keys.last() {
+                    Some(k) if k.cmp(key) == std::cmp::Ordering::Greater => None,
+                    _ => leaf.next_leaf,
+                }
+            };
+
+            match next {
+                Some(next_id) => current_id = next_id,
+                None => return false,
+            }
+        }
     }
 
     /// Get the root node ID
