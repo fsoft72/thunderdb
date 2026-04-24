@@ -201,6 +201,53 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Remove multiple rows from all relevant indices in batch.
+    ///
+    /// Per indexed column: collects all (value, row_id) pairs, sorts by value
+    /// for B-tree traversal locality, then deletes in sorted order.
+    /// Mirrors `insert_rows_batch`.
+    ///
+    /// # Arguments
+    /// * `deletions` - (row_id, old_values) pairs to remove
+    /// * `column_mapping` - maps column names to positions in old_values
+    pub fn delete_rows_batch(
+        &mut self,
+        deletions: &[(u64, Vec<Value>)],
+        column_mapping: &HashMap<String, usize>,
+    ) -> Result<()> {
+        if deletions.is_empty() {
+            return Ok(());
+        }
+
+        for column_name in &self.indexed_columns.clone() {
+            if let Some(&col_idx) = column_mapping.get(column_name) {
+                let mut entries: Vec<(Value, u64)> = Vec::with_capacity(deletions.len());
+                for (row_id, values) in deletions {
+                    if let Some(value) = values.get(col_idx) {
+                        entries.push((value.clone(), *row_id));
+                    }
+                }
+
+                // Sort by key for B-tree traversal locality (mirrors insert_rows_batch)
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+                if let Some(index) = self.indices.get_mut(column_name) {
+                    for (value, row_id) in &entries {
+                        index.delete(value, row_id);
+                    }
+                }
+
+                if let Some(stats) = self.stats_cache.get_mut(column_name) {
+                    for _ in &entries {
+                        stats.record_delete();
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Search for rows where column > value or column >= value
     pub fn greater_than(&self, column_name: &str, value: &Value, inclusive: bool) -> Result<Vec<u64>> {
         if let Some(index) = self.indices.get(column_name) {
@@ -715,5 +762,60 @@ mod tests {
         assert_eq!(cols.len(), 2);
         assert!(cols.contains(&"id".to_string()));
         assert!(cols.contains(&"age".to_string()));
+    }
+
+    #[test]
+    fn test_delete_rows_batch_basic() {
+        let mut mgr = create_test_manager("batch_del_basic");
+        let mapping = create_column_mapping();
+
+        mgr.create_index("id").unwrap();
+        mgr.create_index("age").unwrap();
+
+        for i in 1u64..=5 {
+            let row = create_test_row(i, i as i32 * 10, "User", i as i32 * 5);
+            mgr.insert_row(&row, &mapping).unwrap();
+        }
+
+        // Delete rows 2 and 4
+        let deletions: Vec<(u64, Vec<Value>)> = vec![
+            (2, vec![Value::Int32(20), Value::varchar("User"), Value::Int32(10)]),
+            (4, vec![Value::Int32(40), Value::varchar("User"), Value::Int32(20)]),
+        ];
+        mgr.delete_rows_batch(&deletions, &mapping).unwrap();
+
+        assert!(mgr.search("id", &Value::Int32(20)).unwrap().is_empty());
+        assert!(mgr.search("id", &Value::Int32(40)).unwrap().is_empty());
+        assert_eq!(mgr.search("id", &Value::Int32(10)).unwrap(), vec![1]);
+        assert_eq!(mgr.search("id", &Value::Int32(30)).unwrap(), vec![3]);
+    }
+
+    #[test]
+    fn test_delete_rows_batch_empty() {
+        let mut mgr = create_test_manager("batch_del_empty");
+        let mapping = create_column_mapping();
+        mgr.create_index("id").unwrap();
+        // Should not panic or error on empty input
+        mgr.delete_rows_batch(&[], &mapping).unwrap();
+    }
+
+    #[test]
+    fn test_delete_rows_batch_all_rows() {
+        let mut mgr = create_test_manager("batch_del_all");
+        let mapping = create_column_mapping();
+        mgr.create_index("id").unwrap();
+
+        let mut rows_to_delete = Vec::new();
+        for i in 1u64..=10 {
+            let row = create_test_row(i, i as i32, "User", 20);
+            mgr.insert_row(&row, &mapping).unwrap();
+            rows_to_delete.push((i, vec![Value::Int32(i as i32), Value::varchar("User"), Value::Int32(20)]));
+        }
+
+        mgr.delete_rows_batch(&rows_to_delete, &mapping).unwrap();
+
+        for i in 1i32..=10 {
+            assert!(mgr.search("id", &Value::Int32(i)).unwrap().is_empty());
+        }
     }
 }
