@@ -448,6 +448,147 @@ pub fn build_empty_fixtures(tier: Tier, mode: Durability) -> Fixtures {
     make_fixtures(tier, mode, thunder_dir, sqlite_path, tdb, sdb)
 }
 
+/// Build a single-table dataset (`blog_posts_q`) tuned for SP4a query
+/// scenarios: nullable `category` (~10% NULL), nullable `published_at`
+/// (~30% NULL), indexed `slug`, non-indexed `body`, non-indexed `views`.
+///
+/// Both Thunder and SQLite are populated with identical row contents so
+/// per-scenario `.assert` callbacks can compare row counts byte-for-byte.
+///
+/// Determinism: row `i` (1-based) chooses
+/// - `author_id = (i % 50) + 1`
+/// - `category = if i % 10 == 0 { NULL } else { CATEGORIES[i % 5] }`
+/// - `published_at = if i % 10 < 3 { NULL } else { 1_700_000_000 + i as i64 }`
+/// - `views = ((i * 2654435761) % 1_000_000) as i64`  (Knuth multiplicative hash)
+/// - `slug = format!("post-{:08x}", i)`              (unique, lowercase ascii)
+pub fn build_blog_posts_q_fixtures(tier: Tier, mode: Durability) -> Fixtures {
+    use rusqlite::params;
+    use thunderdb::{DirectDataAccess, Value};
+    use thunderdb::storage::table_engine::{ColumnInfo, TableSchema};
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = format!(
+        "{}_{}_{}_q_{}",
+        std::process::id(), tier.label(), mode.label(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    );
+    let base = std::env::temp_dir().join(format!("thunderdb_perf_{}", unique));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let thunder_dir = base.join("thunder");
+    let sqlite_path = base.join("sqlite.db");
+
+    const CATEGORIES: [&str; 5] = ["news", "review", "tutorial", "opinion", "guide"];
+    let post_count = tier.post_count();
+
+    // ── Thunder ──
+    let mut tdb = Database::open(&thunder_dir).expect("open thunderdb");
+
+    let posts: Vec<Vec<Value>> = (1..=post_count).map(|i| {
+        let author_id = (i as i64 % 50) + 1;
+        let category: Value = if i % 10 == 0 {
+            Value::Null
+        } else {
+            Value::varchar(CATEGORIES[i % CATEGORIES.len()].to_string())
+        };
+        let published_at: Value = if i % 10 < 3 {
+            Value::Null
+        } else {
+            Value::Int64(1_700_000_000 + i as i64)
+        };
+        let views = ((i as i64).wrapping_mul(2654435761)).rem_euclid(1_000_000);
+        vec![
+            Value::Int64(i as i64),
+            Value::Int64(author_id),
+            Value::varchar(format!("Post about topic #{}", i)),
+            Value::varchar(format!("post-{:08x}", i)),
+            Value::varchar(format!("This is the body of post {}.  Topic discussion follows for several sentences.", i)),
+            category,
+            published_at,
+            Value::Int64(views),
+        ]
+    }).collect();
+
+    tdb.insert_batch("blog_posts_q", posts).unwrap();
+    {
+        let tbl = tdb.get_table_mut("blog_posts_q").unwrap();
+        tbl.set_schema(TableSchema { columns: vec![
+            ColumnInfo { name: "id".into(),           data_type: "INT64".into() },
+            ColumnInfo { name: "author_id".into(),    data_type: "INT64".into() },
+            ColumnInfo { name: "title".into(),        data_type: "VARCHAR".into() },
+            ColumnInfo { name: "slug".into(),         data_type: "VARCHAR".into() },
+            ColumnInfo { name: "body".into(),         data_type: "VARCHAR".into() },
+            ColumnInfo { name: "category".into(),     data_type: "VARCHAR".into() },
+            ColumnInfo { name: "published_at".into(), data_type: "INT64".into() },
+            ColumnInfo { name: "views".into(),        data_type: "INT64".into() },
+        ]}).unwrap();
+        tbl.create_index("id").unwrap();
+        tbl.create_index("author_id").unwrap();
+        tbl.create_index("title").unwrap();
+        tbl.create_index("slug").unwrap();
+    }
+
+    // ── SQLite ──
+    let sdb = Connection::open(&sqlite_path).unwrap();
+    match mode {
+        Durability::Fast => {
+            sdb.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;").unwrap();
+        }
+        Durability::Durable => {
+            sdb.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;").unwrap();
+        }
+    }
+    sdb.execute_batch(
+        "CREATE TABLE blog_posts_q (
+            id INTEGER PRIMARY KEY,
+            author_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            body TEXT NOT NULL,
+            category TEXT,
+            published_at INTEGER,
+            views INTEGER NOT NULL
+         );
+         CREATE INDEX idx_q_author ON blog_posts_q(author_id);
+         CREATE INDEX idx_q_title  ON blog_posts_q(title);
+         CREATE INDEX idx_q_slug   ON blog_posts_q(slug);"
+    ).unwrap();
+
+    {
+        let tx = sdb.unchecked_transaction().unwrap();
+        {
+            let mut st = tx.prepare(
+                "INSERT INTO blog_posts_q (id, author_id, title, slug, body, category, published_at, views)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").unwrap();
+            for i in 1..=post_count {
+                let author_id = (i as i64 % 50) + 1;
+                let category: Option<String> = if i % 10 == 0 {
+                    None
+                } else {
+                    Some(CATEGORIES[i % CATEGORIES.len()].to_string())
+                };
+                let published_at: Option<i64> = if i % 10 < 3 {
+                    None
+                } else {
+                    Some(1_700_000_000 + i as i64)
+                };
+                let views = ((i as i64).wrapping_mul(2654435761)).rem_euclid(1_000_000);
+                st.execute(params![
+                    i as i64, author_id,
+                    format!("Post about topic #{}", i),
+                    format!("post-{:08x}", i),
+                    format!("This is the body of post {}.  Topic discussion follows for several sentences.", i),
+                    category, published_at, views,
+                ]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    make_fixtures(tier, mode, thunder_dir, sqlite_path, tdb, sdb)
+}
+
 /// Close and reopen both engine handles. Used between COLD samples.
 pub(crate) fn reopen_handles(f: &mut Fixtures) -> std::io::Result<()> {
     let (_t, _s) = f.take_handles();
