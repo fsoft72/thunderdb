@@ -848,6 +848,21 @@ impl DirectDataAccess for Database {
     ) -> Result<Vec<AggRow>> {
         use crate::query::aggregate as aggm;
 
+        // Fast path: global COUNT(*) (with optional filters) → route to
+        // existing count(), which already uses index/callback fast paths.
+        if group_by.is_empty()
+            && aggs.len() == 1
+            && matches!(aggs[0], Aggregate::Count)
+        {
+            let n = self.count(table, filters)?;
+            let n_i64 = i64::try_from(n).map_err(|_| {
+                crate::error::Error::Query(
+                    "aggregate: COUNT exceeds i64::MAX".into()
+                )
+            })?;
+            return Ok(vec![AggRow { keys: vec![], aggs: vec![Value::Int64(n_i64)] }]);
+        }
+
         // Snapshot the schema column names + types (drops the &mut borrow
         // before re-entering `for_each_row`, which also borrows mutably).
         let (schema_cols, schema_types): (Vec<String>, Vec<String>) = {
