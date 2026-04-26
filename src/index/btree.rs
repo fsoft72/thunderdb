@@ -293,6 +293,35 @@ where
         results
     }
 
+    /// Return all distinct keys in ascending order.
+    ///
+    /// Walks the leaf chain forward and emits each unique key exactly once.
+    /// Duplicates within a leaf or spanning leaf boundaries are collapsed by
+    /// comparing against the last emitted key.
+    pub fn scan_distinct_keys(&self) -> Vec<K> {
+        let mut out: Vec<K> = Vec::new();
+        let Some(first_id) = self.first_leaf_id else { return out; };
+        let mut current_id = first_id;
+        loop {
+            let leaf = match self.nodes.get(current_id as usize) {
+                Some(n) => n,
+                None => break,
+            };
+            for i in 0..leaf.keys.len() {
+                let k = &leaf.keys[i];
+                match out.last() {
+                    Some(prev) if prev == k => {}
+                    _ => out.push(k.clone()),
+                }
+            }
+            match leaf.next_leaf {
+                Some(next) => current_id = next,
+                None => break,
+            }
+        }
+        out
+    }
+
     /// Return the first `k` (key, value) pairs in ascending key order.
     /// Stops walking leaves once `k` pairs are collected.
     pub fn scan_first_k(&self, k: usize) -> Vec<(K, V)> {

@@ -946,6 +946,19 @@ impl DirectDataAccess for Database {
     ) -> Result<Vec<Vec<Value>>> {
         use std::collections::HashSet;
 
+        // Fast path: single column, no filters, column is indexed →
+        // walk the B-tree leaves and emit each unique key once.
+        if cols.len() == 1 && filters.is_empty() {
+            let col = &cols[0];
+            if let Ok(tbl) = self.get_table_mut(table) {
+                if tbl.index_manager().has_index(col) {
+                    if let Some(keys) = tbl.index_manager().distinct_indexed_keys(col) {
+                        return Ok(keys.into_iter().map(|v| vec![v]).collect());
+                    }
+                }
+            }
+        }
+
         // Snapshot schema column names (drops the &mut borrow before
         // re-entering `for_each_row`, which also borrows mutably).
         let schema_cols: Vec<String> = {
