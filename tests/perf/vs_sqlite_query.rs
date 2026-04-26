@@ -169,6 +169,32 @@ fn scenarios() -> Vec<Scenario> {
                 if t as i64 != s { Err(format!("Q5 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
             })
             .build(),
+
+        // Q6. WHERE category IS NULL
+        Scenario::new("Q6. IS NULL filter", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q",
+                    vec![Filter::new("category", Operator::IsNull)],
+                    None, None).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q WHERE category IS NULL").unwrap();
+                let _: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().count(
+                    "blog_posts_q",
+                    vec![Filter::new("category", Operator::IsNull)]).unwrap();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q WHERE category IS NULL",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q6 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
