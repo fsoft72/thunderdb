@@ -53,6 +53,50 @@ fn scenarios() -> Vec<Scenario> {
                 if t != s { Err(format!("Q11 count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
             })
             .build(),
+
+        // Q12. SUM(views)  — non-indexed full scan
+        Scenario::new("Q12. SUM int non-indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Sum("views".into())], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let _: i64 = f.sqlite().query_row(
+                    "SELECT SUM(views) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Sum("views".into())], vec![]).unwrap();
+                let t = match r[0].aggs[0] { Value::Int64(n) => n, _ => -1 };
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT SUM(views) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+                if t != s { Err(format!("Q12 sum: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
+
+        // Q13. AVG(views) — non-indexed full scan
+        Scenario::new("Q13. AVG int non-indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Avg("views".into())], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let _: f64 = f.sqlite().query_row(
+                    "SELECT AVG(views) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Avg("views".into())], vec![]).unwrap();
+                let t = match r[0].aggs[0] { Value::Float64(x) => x, _ => f64::NAN };
+                let s: f64 = f.sqlite().query_row(
+                    "SELECT AVG(views) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+                if (t - s).abs() > 1e-6 {
+                    Err(format!("Q13 avg: thunder={}, sqlite={}", t, s))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
