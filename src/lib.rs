@@ -24,7 +24,7 @@ pub use error::{Error, Result};
 pub use storage::{Value, Row, TableEngine};
 use storage::page::value_at_page_bytes;
 pub use index::{IndexManager};
-pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters, multi_index_scan};
+pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, Aggregate, AggRow, choose_index, apply_filters, multi_index_scan};
 pub use parser::{parse_sql, Statement, PreparedCache};
 
 /// ThunderDB version
@@ -830,6 +830,201 @@ impl DirectDataAccess for Database {
             callback(&row.values);
         }
         Ok(n)
+    }
+
+    /// GROUP BY + aggregate over `table`, with optional WHERE `filters`.
+    ///
+    /// Default code path: full streaming scan via `for_each_row` (with
+    /// minimal projection covering only the columns referenced by
+    /// `group_by` and `aggs`), folding rows into a hash-grouped
+    /// accumulator. Indexed / cached fast paths will dispatch in front
+    /// of this in later tasks.
+    fn aggregate(
+        &mut self,
+        table: &str,
+        group_by: Vec<String>,
+        aggs: Vec<Aggregate>,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<AggRow>> {
+        use crate::query::aggregate as aggm;
+
+        // Fast path: global COUNT(*) (with optional filters) → route to
+        // existing count(), which already uses index/callback fast paths.
+        if group_by.is_empty()
+            && aggs.len() == 1
+            && matches!(aggs[0], Aggregate::Count)
+        {
+            let n = self.count(table, filters)?;
+            let n_i64 = i64::try_from(n).map_err(|_| {
+                crate::error::Error::Query(
+                    "aggregate: COUNT exceeds i64::MAX".into()
+                )
+            })?;
+            return Ok(vec![AggRow { keys: vec![], aggs: vec![Value::Int64(n_i64)] }]);
+        }
+
+        // Fast path: global MIN/MAX over indexed columns, no filters.
+        // Each MIN/MAX collapses to a single B-tree endpoint lookup.
+        if group_by.is_empty()
+            && filters.is_empty()
+            && !aggs.is_empty()
+            && aggs.iter().all(|a| matches!(a, Aggregate::Min(_) | Aggregate::Max(_)))
+        {
+            // Verify all referenced columns are indexed.
+            let all_indexed = {
+                let tbl = self.get_table_mut(table)?;
+                aggs.iter().all(|a| {
+                    let col = match a {
+                        Aggregate::Min(c) | Aggregate::Max(c) => c,
+                        _ => unreachable!(),
+                    };
+                    tbl.index_manager().has_index(col)
+                })
+            };
+            if all_indexed {
+                // Snapshot schema column ordering once for index lookup.
+                let schema_cols: Vec<String> = {
+                    let tbl = self.get_table_mut(table)?;
+                    let s = tbl.schema().ok_or_else(|| {
+                        Error::InvalidOperation(
+                            format!("aggregate: table `{}` has no schema", table)
+                        )
+                    })?;
+                    s.columns.iter().map(|c| c.name.clone()).collect()
+                };
+                let mut out = Vec::with_capacity(aggs.len());
+                for a in &aggs {
+                    let (col, want_max) = match a {
+                        Aggregate::Min(c) => (c, false),
+                        Aggregate::Max(c) => (c, true),
+                        _ => unreachable!(),
+                    };
+                    let rows = self.scan_indexed_top_k(table, col, 1, want_max)?;
+                    let v = rows.first().and_then(|r| {
+                        let idx = schema_cols.iter().position(|c| c == col)?;
+                        r.values.get(idx).cloned()
+                    }).unwrap_or(Value::Null);
+                    out.push(v);
+                }
+                return Ok(vec![AggRow { keys: vec![], aggs: out }]);
+            }
+        }
+
+        // Fast path: single-column GROUP BY with only COUNT(*) over an
+        // indexed column, no filters → walk B-tree leaves grouping by
+        // key (run-length count). No row materialisation.
+        if group_by.len() == 1
+            && filters.is_empty()
+            && !aggs.is_empty()
+            && aggs.iter().all(|a| matches!(a, Aggregate::Count))
+        {
+            let col = &group_by[0];
+            let indexed = {
+                let tbl = self.get_table_mut(table)?;
+                tbl.index_manager().has_index(col)
+            };
+            if indexed {
+                let pairs = {
+                    let tbl = self.get_table_mut(table)?;
+                    tbl.index_manager().group_count_by_indexed_key(col)
+                };
+                if let Some(pairs) = pairs {
+                    let n_aggs = aggs.len();
+                    let mut out = Vec::with_capacity(pairs.len());
+                    for (k, c) in pairs {
+                        let c_i64 = i64::try_from(c).map_err(|_| {
+                            crate::error::Error::Query(
+                                "aggregate: COUNT exceeds i64::MAX".into()
+                            )
+                        })?;
+                        out.push(AggRow {
+                            keys: vec![k],
+                            aggs: vec![Value::Int64(c_i64); n_aggs],
+                        });
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+
+        // Snapshot the schema column names + types (drops the &mut borrow
+        // before re-entering `for_each_row`, which also borrows mutably).
+        let (schema_cols, schema_types): (Vec<String>, Vec<String>) = {
+            let table_engine = self.get_table_mut(table)?;
+            let schema = table_engine.schema().ok_or_else(|| {
+                Error::InvalidOperation(
+                    "aggregate requires table schema to be set".into()
+                )
+            })?;
+            let cols = schema.columns.iter().map(|c| c.name.clone()).collect();
+            let types = schema.columns.iter().map(|c| c.data_type.clone()).collect();
+            (cols, types)
+        };
+
+        let plan = aggm::plan(&schema_cols, &schema_types, &group_by, &aggs)?;
+        let projection = Some(plan.projection.clone());
+
+        let mut agg = aggm::Aggregator::new(&plan);
+        self.for_each_row(table, filters, projection, |row| agg.feed(row))?;
+
+        agg.into_rows()
+    }
+
+    /// `SELECT DISTINCT cols FROM table WHERE filters`.
+    ///
+    /// Default code path: streaming scan with projection limited to the
+    /// selected columns, deduplicating by hashing each projected row tuple
+    /// into a `HashSet<Vec<Value>>`. Row order in the result is unspecified.
+    fn distinct(
+        &mut self,
+        table: &str,
+        cols: Vec<String>,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Vec<Value>>> {
+        use std::collections::HashSet;
+
+        // Fast path: single column, no filters, column is indexed →
+        // walk the B-tree leaves and emit each unique key once.
+        if cols.len() == 1 && filters.is_empty() {
+            let col = &cols[0];
+            if let Ok(tbl) = self.get_table_mut(table) {
+                if tbl.index_manager().has_index(col) {
+                    if let Some(keys) = tbl.index_manager().distinct_indexed_keys(col) {
+                        return Ok(keys.into_iter().map(|v| vec![v]).collect());
+                    }
+                }
+            }
+        }
+
+        // Snapshot schema column names (drops the &mut borrow before
+        // re-entering `for_each_row`, which also borrows mutably).
+        let schema_cols: Vec<String> = {
+            let table_engine = self.get_table_mut(table)?;
+            let schema = table_engine.schema().ok_or_else(|| {
+                Error::InvalidOperation(
+                    "distinct requires table schema to be set".into()
+                )
+            })?;
+            schema.columns.iter().map(|c| c.name.clone()).collect()
+        };
+
+        // Resolve each requested column name to its position in the schema.
+        let proj_idxs: Vec<usize> = cols.iter().map(|name| {
+            schema_cols.iter().position(|c| c == name).ok_or_else(|| {
+                Error::Query(format!("distinct: unknown column `{}`", name))
+            })
+        }).collect::<Result<_>>()?;
+
+        let mut seen: HashSet<Vec<Value>> = HashSet::new();
+        let projection = Some(proj_idxs.clone());
+        let proj_len = proj_idxs.len();
+
+        self.for_each_row(table, filters, projection, |row| {
+            let key: Vec<Value> = (0..proj_len).map(|i| row[i].clone()).collect();
+            seen.insert(key);
+        })?;
+
+        Ok(seen.into_iter().collect())
     }
 }
 

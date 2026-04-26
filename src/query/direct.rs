@@ -9,6 +9,32 @@ use crate::query::{Filter, Operator};
 use crate::storage::{Row, Value};
 use std::collections::HashMap;
 
+/// Aggregate function over a column (or, for `Count`, over rows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aggregate {
+    /// `COUNT(*)` — counts rows regardless of NULLs.
+    Count,
+    /// `COUNT(col)` — counts rows where `col` is non-NULL.
+    CountCol(String),
+    /// `SUM(col)` — INT64 columns only; returns `Value::Null` if all inputs NULL.
+    Sum(String),
+    /// `AVG(col)` — INT64 columns only; returns `Value::Float64` (or `Value::Null`).
+    Avg(String),
+    /// `MIN(col)` — typed-as-input; NULLs skipped.
+    Min(String),
+    /// `MAX(col)` — typed-as-input; NULLs skipped.
+    Max(String),
+}
+
+/// Result row from `aggregate()`. `keys` is empty for global aggregates
+/// (i.e., when `group_by` was empty); otherwise it parallels `group_by`.
+/// `aggs` parallels the `aggs` argument in order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggRow {
+    pub keys: Vec<Value>,
+    pub aggs: Vec<Value>,
+}
+
 /// Direct data access trait for type-safe CRUD operations
 ///
 /// Bypasses SQL parsing for maximum performance
@@ -142,6 +168,30 @@ pub trait DirectDataAccess {
         projection: Option<Vec<usize>>,
         callback: F,
     ) -> Result<usize>;
+
+    /// GROUP BY `group_by`, computing `aggs`, with optional WHERE `filters`.
+    /// Empty `group_by` = global aggregate; returns exactly one row.
+    /// SQLite-matched semantics: NULLs are skipped by SUM/AVG/MIN/MAX/CountCol;
+    /// SUM of empty input returns `Value::Null` (not zero); AVG returns `Value::Null`;
+    /// MIN/MAX over empty input return `Value::Null`.
+    /// Group ordering is implementation-defined.
+    fn aggregate(
+        &mut self,
+        table: &str,
+        group_by: Vec<String>,
+        aggs: Vec<Aggregate>,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<AggRow>>;
+
+    /// `SELECT DISTINCT cols FROM table WHERE filters`.
+    /// Single-column queries still return `Vec<Vec<Value>>` for shape uniformity.
+    /// Row ordering is implementation-defined.
+    fn distinct(
+        &mut self,
+        table: &str,
+        cols: Vec<String>,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Vec<Value>>>;
 }
 
 /// Query execution context
