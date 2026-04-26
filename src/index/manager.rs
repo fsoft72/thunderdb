@@ -378,6 +378,16 @@ impl IndexManager {
         Some(index.scan_distinct_keys())
     }
 
+    /// Return `(key, count)` pairs in ascending key order from the index on
+    /// `column_name`. Returns `None` if the column has no index.
+    pub fn group_count_by_indexed_key(
+        &self,
+        column_name: &str,
+    ) -> Option<Vec<(Value, usize)>> {
+        let index = self.indices.get(column_name)?;
+        Some(index.group_count_by_key())
+    }
+
     /// Get all indexed columns
     pub fn indexed_columns(&self) -> &[String] {
         &self.indexed_columns

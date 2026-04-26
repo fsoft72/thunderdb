@@ -910,6 +910,43 @@ impl DirectDataAccess for Database {
             }
         }
 
+        // Fast path: single-column GROUP BY with only COUNT(*) over an
+        // indexed column, no filters → walk B-tree leaves grouping by
+        // key (run-length count). No row materialisation.
+        if group_by.len() == 1
+            && filters.is_empty()
+            && !aggs.is_empty()
+            && aggs.iter().all(|a| matches!(a, Aggregate::Count))
+        {
+            let col = &group_by[0];
+            let indexed = {
+                let tbl = self.get_table_mut(table)?;
+                tbl.index_manager().has_index(col)
+            };
+            if indexed {
+                let pairs = {
+                    let tbl = self.get_table_mut(table)?;
+                    tbl.index_manager().group_count_by_indexed_key(col)
+                };
+                if let Some(pairs) = pairs {
+                    let n_aggs = aggs.len();
+                    let mut out = Vec::with_capacity(pairs.len());
+                    for (k, c) in pairs {
+                        let c_i64 = i64::try_from(c).map_err(|_| {
+                            crate::error::Error::Query(
+                                "aggregate: COUNT exceeds i64::MAX".into()
+                            )
+                        })?;
+                        out.push(AggRow {
+                            keys: vec![k],
+                            aggs: vec![Value::Int64(c_i64); n_aggs],
+                        });
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+
         // Snapshot the schema column names + types (drops the &mut borrow
         // before re-entering `for_each_row`, which also borrows mutably).
         let (schema_cols, schema_types): (Vec<String>, Vec<String>) = {
