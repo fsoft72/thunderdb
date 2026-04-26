@@ -150,3 +150,30 @@ fn restore_all_preserves_cold_fadvise() {
     assert_eq!(n, Tier::Small.post_count());
     drop_fixtures(f);
 }
+
+#[test]
+fn blog_posts_q_fixture_shape() {
+    use thunderdb::{DirectDataAccess, Filter, Operator};
+    use crate::common::fairness::{Tier, Durability};
+    use crate::common::fixtures::{build_blog_posts_q_fixtures, drop_fixtures};
+
+    let mut f = build_blog_posts_q_fixtures(Tier::Small, Durability::Fast);
+
+    let total = f.thunder_mut().count("blog_posts_q", vec![]).unwrap() as usize;
+    assert_eq!(total, Tier::Small.post_count(), "row count mismatch");
+
+    let nulls = f.thunder_mut().count(
+        "blog_posts_q",
+        vec![Filter::new("category", Operator::IsNull)],
+    ).unwrap();
+    let expected_nulls = Tier::Small.post_count() / 10;
+    assert_eq!(nulls, expected_nulls,
+        "category NULL count: got {}, want {}", nulls, expected_nulls);
+
+    // SQLite must agree.
+    let s_nulls: i64 = f.sqlite().query_row(
+        "SELECT COUNT(*) FROM blog_posts_q WHERE category IS NULL", [], |r| r.get(0)).unwrap();
+    assert_eq!(s_nulls as usize, nulls, "thunder/sqlite NULL count disagree");
+
+    drop_fixtures(f);
+}
