@@ -117,6 +117,35 @@ fn scenarios() -> Vec<Scenario> {
                 if t as i64 != s { Err(format!("Q3 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
             })
             .build(),
+
+        // Q4. WHERE author_id = ? ORDER BY id DESC LIMIT 10
+        Scenario::new("Q4. Top-K via ORDER BY indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let rows = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q",
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int64(7)))],
+                    None, None).unwrap();
+                let _ = take_n(sort_rows_by_int(rows, 0, true), 10);
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q WHERE author_id = 7 ORDER BY id DESC LIMIT 10").unwrap();
+                let _: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let rows = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q",
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int64(7)))],
+                    None, None).unwrap();
+                let t = take_n(sort_rows_by_int(rows, 0, true), 10).len();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT id FROM blog_posts_q WHERE author_id = 7 ORDER BY id DESC LIMIT 10)",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q4 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
