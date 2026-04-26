@@ -1,5 +1,52 @@
 # ThunderDB Changes
 
+## 2026-04-26 - SP4b: Query features II (GROUP BY, aggregates, DISTINCT)
+
+Sixth sub-project in the "faster than SQLite in all benchmarks" program. Adds query-shape coverage for the SQL features deferred from SP4a — `GROUP BY`, scalar aggregates, and `DISTINCT` — and ships native `DirectDataAccess::aggregate` and `DirectDataAccess::distinct` APIs to compute them. Four B-tree-backed fast paths close every measurable loss except the four scenarios bound by the row-decoder hotspot or non-indexed scans.
+
+- **11 new query scenarios** in `tests/perf/vs_sqlite_query2.rs`:
+  - Q10 COUNT(*) full table
+  - Q11 COUNT(*) WHERE author_id = 7 (indexed)
+  - Q12 SUM(views) — non-indexed full scan
+  - Q13 AVG(views) — non-indexed full scan
+  - Q14 MIN/MAX(id) — indexed PK
+  - Q15 MIN/MAX(views) — non-indexed
+  - Q16 GROUP BY author_id, COUNT(*) — indexed key
+  - Q17 GROUP BY category, COUNT(*) — non-indexed key (includes NULL group)
+  - Q18 GROUP BY author_id, SUM(views) — indexed key
+  - Q19 SELECT DISTINCT slug — high-card indexed
+  - Q20 SELECT DISTINCT category — low-card non-indexed
+- **New API**: `Aggregate` enum (`Count`, `CountCol`, `Sum`, `Avg`, `Min`, `Max`), `AggRow { keys, aggs }` struct, and two `DirectDataAccess` methods `aggregate(table, group_by, aggs, filters)` and `distinct(table, cols, filters)`. SQLite-matched semantics: SUM/AVG/MIN/MAX skip NULLs; SUM of empty input returns NULL (not zero); AVG of empty returns NULL; MIN/MAX over empty returns NULL. Plan-time type validation rejects SUM/AVG on non-INT64 columns. SUM and COUNT use checked `i64::try_from` and return an explicit overflow error.
+- **Shared fixture**: SP4a's `blog_posts_q` (10 000 rows) reused unchanged.
+- **Soft FAST/WARM loss gate by default**, strict via `SP4B_STRICT_LOSS_GATE=1`. Mirrors SP3 / SP4a policy.
+- **Closures landed (perf fast paths)**:
+  - **COUNT(\*) dispatch** — `Database::aggregate` routes `Aggregate::Count` (with or without filters) through the existing `count()` path. Closes Q10 (398.57x → 0.035x) and Q11 (7.78x → 0.256x).
+  - **MIN/MAX over indexed cols** — global `Min`/`Max` aggregates on indexed columns walk the B-tree first/last leaf via SP4a's `scan_indexed_top_k`. Closes Q14 (3.46x → 0.004x).
+  - **DISTINCT single indexed col** — new `BTree::scan_distinct_keys` + `IndexManager::distinct_indexed_keys` walk the leaf chain once and dedup consecutive keys. Wired into `Database::distinct` for `cols.len() == 1, filters.is_empty()`. Closes Q19 (1.99x → 0.472x).
+  - **GROUP BY single indexed col with COUNT** — new `BTree::group_count_by_key` + `IndexManager::group_count_by_indexed_key` emit one `(key, count)` per leaf run-length. Wired into `Database::aggregate` for `group_by.len() == 1, aggs == [Count], filters.is_empty()` on indexed keys. Closes Q16 (4.39x → 0.077x).
+- **FAST/WARM ratios (SMALL tier, 11 samples) — final baseline**:
+
+  | Scenario | Pre-closure | Final | Verdict |
+  |---|---:|---:|---|
+  | Q10. COUNT(*) full table | 398.57x | **0.035x** | **Win** |
+  | Q11. COUNT(*) WHERE indexed | 7.78x | **0.256x** | **Win** |
+  | Q12. SUM int non-indexed | 4.15x | 4.118x | Loss (deferred — row-decoder) |
+  | Q13. AVG int non-indexed | 4.23x | 4.187x | Loss (deferred — row-decoder) |
+  | Q14. MIN/MAX indexed | 3.46x | **0.004x** | **Win** |
+  | Q15. MIN/MAX non-indexed | 2.57x | 2.588x | Loss (deferred — row-decoder) |
+  | Q16. GROUP BY indexed low-card | 4.39x | **0.077x** | **Win** |
+  | Q17. GROUP BY non-indexed low-card | 0.77x | 0.762x | **Win** |
+  | Q18. GROUP BY + SUM | 0.84x | 0.853x | **Win** |
+  | Q19. DISTINCT high-card indexed | 1.99x | **0.472x** | **Win** |
+  | Q20. DISTINCT low-card non-indexed | 2.68x | 2.739x | Loss (deferred — non-indexed) |
+
+  **7 Wins, 0 Ties, 4 Losses, 0 Failures.** All four remaining losses are explicitly deferred per the spec (row-decoder hotspot or non-indexed scans).
+
+- **Separate baseline file**: query II scenarios committed to `perf/baseline-query2.json`; SP4a's query I scenarios stay on `perf/baseline-query.json`. Same per-binary baseline pattern from SP3.
+
+Spec: `docs/superpowers/specs/2026-04-26-sp4b-query-features-2-design.md`
+Plan: `docs/superpowers/plans/2026-04-26-sp4b-query-features-2.md`
+
 ## 2026-04-26 - SP4a: Query features I (ORDER BY, IS NULL, multi-filter, OFFSET, string EQ)
 
 Fifth sub-project in the "faster than SQLite in all benchmarks" program. Adds query-shape coverage for features that already exist in ThunderDB but were not measured against SQLite, plus an ORDER-BY-indexed pushdown that closes the largest single-scenario losses surfaced by the new baseline.
