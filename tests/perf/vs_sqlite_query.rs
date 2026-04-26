@@ -243,6 +243,42 @@ fn scenarios() -> Vec<Scenario> {
                 if t != 1 { Err(format!("Q8 row count: thunder={}, want 1", t)) } else { Ok(()) }
             })
             .build(),
+
+        // Q9. multi-filter AND mixed
+        Scenario::new("Q9. multi-filter AND mixed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q",
+                    vec![
+                        Filter::new("author_id",    Operator::Equals(Value::Int64(7))),
+                        Filter::new("category",     Operator::Equals(Value::varchar("review".to_string()))),
+                        Filter::new("published_at", Operator::IsNotNull),
+                    ],
+                    None, None).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q
+                     WHERE author_id = 7 AND category = 'review' AND published_at IS NOT NULL").unwrap();
+                let _: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().count(
+                    "blog_posts_q",
+                    vec![
+                        Filter::new("author_id",    Operator::Equals(Value::Int64(7))),
+                        Filter::new("category",     Operator::Equals(Value::varchar("review".to_string()))),
+                        Filter::new("published_at", Operator::IsNotNull),
+                    ]).unwrap();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q
+                     WHERE author_id = 7 AND category = 'review' AND published_at IS NOT NULL",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q9 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
