@@ -92,6 +92,31 @@ fn scenarios() -> Vec<Scenario> {
                 if t as i64 != s { Err(format!("Q2 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
             })
             .build(),
+
+        // Q3. ORDER BY non-indexed (views) full sort + LIMIT 100
+        Scenario::new("Q3. ORDER BY non-indexed full sort", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let rows = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q", vec![], None, None).unwrap();
+                let _ = take_n(sort_rows_by_int(rows, 7, false), 100);
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q ORDER BY views LIMIT 100").unwrap();
+                let _: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let rows = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q", vec![], None, None).unwrap();
+                let t = take_n(sort_rows_by_int(rows, 7, false), 100).len();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT id FROM blog_posts_q ORDER BY views LIMIT 100)",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q3 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
