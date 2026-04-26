@@ -356,6 +356,16 @@ impl IndexManager {
         }
     }
 
+    /// Return up to `k` row_ids from the index on `column_name`, in indexed order.
+    /// `desc=false` -> first `k` (smallest keys first).
+    /// `desc=true`  -> last `k` (largest keys first).
+    /// Returns `None` if the column has no index.
+    pub fn indexed_top_k_row_ids(&self, column_name: &str, k: usize, desc: bool) -> Option<Vec<u64>> {
+        let index = self.indices.get(column_name)?;
+        let pairs = if desc { index.scan_last_k(k) } else { index.scan_first_k(k) };
+        Some(pairs.into_iter().map(|(_, row_id)| row_id).collect())
+    }
+
     /// Check if a column is indexed
     pub fn has_index(&self, column_name: &str) -> bool {
         self.indices.contains_key(column_name)

@@ -146,6 +146,24 @@ impl Database {
         self.load_table(name, false)
     }
 
+    /// Return up to `k` rows from `table`, sorted by the indexed column `col`.
+    /// `desc` selects descending order.
+    /// Returns an error if the table is missing or the column has no index.
+    pub fn scan_indexed_top_k(
+        &mut self,
+        table: &str,
+        col: &str,
+        k: usize,
+        desc: bool,
+    ) -> Result<Vec<Row>> {
+        let table_engine = self.get_table_mut(table)?;
+        let row_ids = table_engine
+            .index_manager()
+            .indexed_top_k_row_ids(col, k, desc)
+            .ok_or_else(|| Error::Index(format!("No index on column: {}", col)))?;
+        table_engine.get_by_ids(&row_ids)
+    }
+
     /// Create or get a table.
     pub fn get_or_create_table(&mut self, name: &str) -> Result<&mut TableEngine> {
         if !self.tables.contains_key(name) {
