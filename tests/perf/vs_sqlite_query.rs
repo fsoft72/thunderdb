@@ -146,6 +146,29 @@ fn scenarios() -> Vec<Scenario> {
                 if t as i64 != s { Err(format!("Q4 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
             })
             .build(),
+
+        // Q5. LIMIT 50 OFFSET 9000  (deep skip)
+        Scenario::new("Q5. OFFSET deep skip", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q", vec![], Some(50), Some(9000)).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q LIMIT 50 OFFSET 9000").unwrap();
+                let _: Vec<i64> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q", vec![], Some(50), Some(9000)).unwrap().len();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT id FROM blog_posts_q LIMIT 50 OFFSET 9000)",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q5 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
