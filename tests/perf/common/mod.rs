@@ -16,6 +16,7 @@ pub mod runner;
 pub use verdict::{Verdict, classify_ratio};
 pub use fairness::{Tier, Durability, CacheState, HarnessConfig};
 pub use fixtures::{Fixtures, FIXTURE_SEED, USER_COUNT, TOPICS, build_blog_fixtures, build_empty_fixtures,
+                   build_blog_posts_q_fixtures,
                    drop_fixtures, comments_for_post, total_comments};
 pub use report::{BenchResult, EngineTiming, HarnessReport, CellReport, Summary};
 pub use baseline::{load_baseline, save_baseline, index_baseline, delta_pct, BaselineKey};

@@ -1,5 +1,44 @@
 # ThunderDB Changes
 
+## 2026-04-26 - SP4a: Query features I (ORDER BY, IS NULL, multi-filter, OFFSET, string EQ)
+
+Fifth sub-project in the "faster than SQLite in all benchmarks" program. Adds query-shape coverage for features that already exist in ThunderDB but were not measured against SQLite, plus an ORDER-BY-indexed pushdown that closes the largest single-scenario losses surfaced by the new baseline.
+
+- **9 new query scenarios** in `tests/perf/vs_sqlite_query.rs`:
+  - Q1 ORDER BY indexed ASC + LIMIT 100
+  - Q2 ORDER BY indexed DESC + LIMIT 100
+  - Q3 ORDER BY non-indexed full sort
+  - Q4 Top-K via WHERE + ORDER BY indexed
+  - Q5 OFFSET deep skip (LIMIT 50 OFFSET 9000)
+  - Q6 IS NULL filter
+  - Q7 string EQ indexed (`slug`)
+  - Q8 string EQ non-indexed (`body`)
+  - Q9 multi-filter AND mixed (`author_id = ? AND category = ? AND published_at IS NOT NULL`)
+- **`blog_posts_q` fixture** added to `tests/perf/common/fixtures.rs`. Single 10 000-row table with INT64 PK, indexed `author_id`/`title`/`slug`, non-indexed `body`/`views`, nullable `category` (~10% NULL) and `published_at` (~30% NULL). Deterministic generator, no PRNG.
+- **Soft FAST/WARM loss gate by default**, strict via `SP4A_STRICT_LOSS_GATE=1`. Mirrors the SP3 policy.
+- **ORDER BY indexed pushdown** (perf fix): new `BTree::scan_first_k` and `BTree::scan_last_k` (skip-then-collect tail walk; no prev-leaf chain needed), wired through `IndexManager::indexed_top_k_row_ids` and a new public `Database::scan_indexed_top_k(table, col, k, desc)`. Q1 and Q2 closures now use this path instead of full scan + sort + take.
+- **FAST/WARM ratios (SMALL tier, 11 samples) — before vs after the SP4a perf pass**:
+
+  | Scenario | Pre-pushdown | Final | Verdict |
+  |---|---|---|---|
+  | Q1. ORDER BY indexed ASC + LIMIT 100 | 256x | **2.34x** | Loss |
+  | Q2. ORDER BY indexed DESC + LIMIT 100 | 235x | **2.39x** | Loss |
+  | Q3. ORDER BY non-indexed full sort | 5.82x | 5.64x | Loss |
+  | Q4. Top-K via ORDER BY indexed | 13.96x | 13.85x | Loss |
+  | Q5. OFFSET deep skip | 40.79x | 39.42x | Loss |
+  | Q6. IS NULL filter | 1.53x | 1.50x | Loss |
+  | Q7. string EQ indexed | 0.24x | **0.24x** | **Win** |
+  | Q8. string EQ non-indexed | 1.25x | 1.15x | Loss |
+  | Q9. multi-filter AND mixed | 1.91x | 1.97x | Loss |
+
+  Q1: 109× faster after pushdown. Q2: 98× faster. Both still narrowly Loss because the per-row decoding cost dominates once the sort is removed; further improvement requires a leaner row-decoder path that is out of scope for SP4a.
+- **Deferred** (architectural, out of scope per spec): Q3 (non-indexed full sort) and Q9 (multi-filter with non-indexed members) wait for a planner / cost model. Q5 (OFFSET deep skip) wants an OFFSET-aware page-skip path that avoids decoding skipped rows. Q4 wants per-page top-K. Q6 (IS NULL) and Q8 are close enough to Tie that small wins should land them; deferred to a future SP.
+- **Separate baseline file**: query scenarios are committed to `perf/baseline-query.json`; read suite stays on `perf/baseline.json`, write suite on `perf/baseline-write.json`. Same per-binary baseline pattern from SP3.
+- **Combined scoreboard (SMALL/FAST/WARM):** read 10W/1T/0L, write 4W/0T/5L, query 1W/0T/8L. Total: 15 Win, 1 Tie, 13 Loss, 0 Failure across 30 scenarios.
+
+Spec: `docs/superpowers/specs/2026-04-26-sp4a-query-features-1-design.md`
+Plan: `docs/superpowers/plans/2026-04-26-sp4a-query-features-1.md`
+
 ## 2026-04-24 - SP3b: Write-path optimization
 
 Fourth sub-project in the "faster than SQLite in all benchmarks" program. Addresses the architectural write-path gaps identified in SP3 (append-only mutation, per-row index maintenance).

@@ -293,6 +293,71 @@ where
         results
     }
 
+    /// Return the first `k` (key, value) pairs in ascending key order.
+    /// Stops walking leaves once `k` pairs are collected.
+    pub fn scan_first_k(&self, k: usize) -> Vec<(K, V)> {
+        let mut out = Vec::with_capacity(k);
+        if k == 0 { return out; }
+        let Some(first_id) = self.first_leaf_id else { return out; };
+        let mut current_id = first_id;
+        loop {
+            let leaf = match self.nodes.get(current_id as usize) {
+                Some(n) => n,
+                None => break,
+            };
+            for i in 0..leaf.keys.len() {
+                out.push((leaf.keys[i].clone(), leaf.values[i].clone()));
+                if out.len() == k { return out; }
+            }
+            match leaf.next_leaf {
+                Some(next) => current_id = next,
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Return the last `k` (key, value) pairs in DESCENDING key order.
+    /// Walks the forward leaf chain (no prev pointers) but skips entries
+    /// before the tail window without cloning, then collects only the
+    /// last `k` keys+values.
+    pub fn scan_last_k(&self, k: usize) -> Vec<(K, V)> {
+        if k == 0 { return Vec::new(); }
+        let total = self.entry_count;
+        if total == 0 { return Vec::new(); }
+        let to_skip = total.saturating_sub(k);
+
+        let Some(first_id) = self.first_leaf_id else { return Vec::new(); };
+        let mut current_id = first_id;
+        let mut skipped = 0usize;
+        let mut out: Vec<(K, V)> = Vec::with_capacity(k.min(total));
+
+        loop {
+            let leaf = match self.nodes.get(current_id as usize) {
+                Some(n) => n,
+                None => break,
+            };
+            let leaf_len = leaf.keys.len();
+
+            if skipped + leaf_len <= to_skip {
+                skipped += leaf_len;
+            } else {
+                let start = to_skip.saturating_sub(skipped);
+                for i in start..leaf_len {
+                    out.push((leaf.keys[i].clone(), leaf.values[i].clone()));
+                }
+                skipped += leaf_len;
+            }
+
+            match leaf.next_leaf {
+                Some(next) => current_id = next,
+                None => break,
+            }
+        }
+        out.reverse();
+        out
+    }
+
     /// Get the number of entries in the tree — O(1)
     pub fn len(&self) -> usize {
         self.entry_count
@@ -758,6 +823,32 @@ mod tests {
         let keys: Vec<i32> = results.iter().map(|(k, _)| *k).collect();
 
         assert_eq!(keys, vec![3, 5, 7, 10, 12, 15, 18]);
+    }
+
+    #[test]
+    fn scan_first_k_returns_smallest_k_in_order() {
+        let mut t: BTree<i32, u32> = BTree::new(4).unwrap();
+        for &x in &[5, 1, 9, 3, 7] { t.insert(x, x as u32).unwrap(); }
+        let got = t.scan_first_k(3);
+        let keys: Vec<i32> = got.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn scan_last_k_returns_largest_k_in_descending_order() {
+        let mut t: BTree<i32, u32> = BTree::new(4).unwrap();
+        for &x in &[5, 1, 9, 3, 7] { t.insert(x, x as u32).unwrap(); }
+        let got = t.scan_last_k(3);
+        let keys: Vec<i32> = got.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec![9, 7, 5]);
+    }
+
+    #[test]
+    fn scan_first_k_handles_k_larger_than_tree() {
+        let mut t: BTree<i32, u32> = BTree::new(4).unwrap();
+        for &x in &[2, 1] { t.insert(x, x as u32).unwrap(); }
+        let got = t.scan_first_k(10);
+        assert_eq!(got.len(), 2);
     }
 
     #[test]

@@ -98,5 +98,9 @@ name = "vs_sqlite_write"
 path = "tests/perf/vs_sqlite_write.rs"
 
 [[test]]
+name = "vs_sqlite_query"
+path = "tests/perf/vs_sqlite_query.rs"
+
+[[test]]
 name = "harness_selftest"
 path = "tests/perf/harness_selftest.rs"
