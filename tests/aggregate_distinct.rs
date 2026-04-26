@@ -188,6 +188,12 @@ fn aggregate_avg_on_non_int_column_errors_at_plan_time() {
 
     let r = db.aggregate("t", vec![], vec![Aggregate::Avg("name".into())], vec![]);
     assert!(r.is_err(), "AVG on VARCHAR should error at plan time");
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(
+        msg.contains("SUM/AVG requires INT64") && msg.contains("name"),
+        "expected typed error mentioning column name, got: {}",
+        msg
+    );
 }
 
 #[test]
