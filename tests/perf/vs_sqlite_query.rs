@@ -47,9 +47,7 @@ fn scenarios() -> Vec<Scenario> {
         Scenario::new("Q1. ORDER BY indexed ASC + LIMIT 100", "query")
             .setup(|t, m| build_blog_posts_q_fixtures(t, m))
             .thunder(|f| {
-                let rows = f.thunder_mut().scan_with_limit(
-                    "blog_posts_q", vec![], None, None).unwrap();
-                let _ = take_n(sort_rows_by_int(rows, 0, false), 100);
+                let _ = f.thunder_mut().scan_indexed_top_k("blog_posts_q", "id", 100, false).unwrap();
             })
             .sqlite(|f| {
                 let mut st = f.sqlite().prepare(
@@ -58,9 +56,7 @@ fn scenarios() -> Vec<Scenario> {
                     .map(|r| r.unwrap()).collect();
             })
             .assert(|f| {
-                let rows = f.thunder_mut().scan_with_limit(
-                    "blog_posts_q", vec![], None, None).unwrap();
-                let t = take_n(sort_rows_by_int(rows, 0, false), 100).len();
+                let t = f.thunder_mut().scan_indexed_top_k("blog_posts_q", "id", 100, false).unwrap().len();
                 let s: i64 = f.sqlite().query_row(
                     "SELECT COUNT(*) FROM (SELECT id FROM blog_posts_q ORDER BY id LIMIT 100)",
                     [], |r| r.get(0)).unwrap();
@@ -72,9 +68,7 @@ fn scenarios() -> Vec<Scenario> {
         Scenario::new("Q2. ORDER BY indexed DESC + LIMIT 100", "query")
             .setup(|t, m| build_blog_posts_q_fixtures(t, m))
             .thunder(|f| {
-                let rows = f.thunder_mut().scan_with_limit(
-                    "blog_posts_q", vec![], None, None).unwrap();
-                let _ = take_n(sort_rows_by_int(rows, 0, true), 100);
+                let _ = f.thunder_mut().scan_indexed_top_k("blog_posts_q", "id", 100, true).unwrap();
             })
             .sqlite(|f| {
                 let mut st = f.sqlite().prepare(
@@ -83,9 +77,7 @@ fn scenarios() -> Vec<Scenario> {
                     .map(|r| r.unwrap()).collect();
             })
             .assert(|f| {
-                let rows = f.thunder_mut().scan_with_limit(
-                    "blog_posts_q", vec![], None, None).unwrap();
-                let t = take_n(sort_rows_by_int(rows, 0, true), 100).len();
+                let t = f.thunder_mut().scan_indexed_top_k("blog_posts_q", "id", 100, true).unwrap().len();
                 let s: i64 = f.sqlite().query_row(
                     "SELECT COUNT(*) FROM (SELECT id FROM blog_posts_q ORDER BY id DESC LIMIT 100)",
                     [], |r| r.get(0)).unwrap();
