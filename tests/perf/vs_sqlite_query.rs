@@ -195,6 +195,54 @@ fn scenarios() -> Vec<Scenario> {
                 if t as i64 != s { Err(format!("Q6 row count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
             })
             .build(),
+
+        // Q7. WHERE slug = ? (indexed string EQ)
+        Scenario::new("Q7. string EQ indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q",
+                    vec![Filter::new("slug", Operator::Equals(Value::varchar(slug_for(1234))))],
+                    None, None).unwrap();
+            })
+            .sqlite(|f| {
+                let target = slug_for(1234);
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q WHERE slug = ?1").unwrap();
+                let _: Vec<i64> = st.query_map([&target], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().count(
+                    "blog_posts_q",
+                    vec![Filter::new("slug", Operator::Equals(Value::varchar(slug_for(1234))))]).unwrap();
+                if t != 1 { Err(format!("Q7 row count: thunder={}, want 1", t)) } else { Ok(()) }
+            })
+            .build(),
+
+        // Q8. WHERE body = ? (non-indexed string EQ)
+        Scenario::new("Q8. string EQ non-indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().scan_with_limit(
+                    "blog_posts_q",
+                    vec![Filter::new("body", Operator::Equals(Value::varchar(body_for(1234))))],
+                    None, None).unwrap();
+            })
+            .sqlite(|f| {
+                let target = body_for(1234);
+                let mut st = f.sqlite().prepare(
+                    "SELECT * FROM blog_posts_q WHERE body = ?1").unwrap();
+                let _: Vec<i64> = st.query_map([&target], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().count(
+                    "blog_posts_q",
+                    vec![Filter::new("body", Operator::Equals(Value::varchar(body_for(1234))))]).unwrap();
+                if t != 1 { Err(format!("Q8 row count: thunder={}, want 1", t)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
