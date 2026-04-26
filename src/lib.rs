@@ -848,25 +848,71 @@ impl DirectDataAccess for Database {
     ) -> Result<Vec<AggRow>> {
         use crate::query::aggregate as aggm;
 
-        // Snapshot the schema column names (drops the &mut borrow before
-        // we re-enter `for_each_row`, which also borrows mutably).
-        let schema_cols: Vec<String> = {
+        // Snapshot the schema column names + types (drops the &mut borrow
+        // before re-entering `for_each_row`, which also borrows mutably).
+        let (schema_cols, schema_types): (Vec<String>, Vec<String>) = {
             let table_engine = self.get_table_mut(table)?;
             let schema = table_engine.schema().ok_or_else(|| {
                 Error::InvalidOperation(
                     "aggregate requires table schema to be set".into()
                 )
             })?;
-            schema.columns.iter().map(|c| c.name.clone()).collect()
+            let cols = schema.columns.iter().map(|c| c.name.clone()).collect();
+            let types = schema.columns.iter().map(|c| c.data_type.clone()).collect();
+            (cols, types)
         };
 
-        let plan = aggm::plan(&schema_cols, &group_by, &aggs)?;
+        let plan = aggm::plan(&schema_cols, &schema_types, &group_by, &aggs)?;
         let projection = Some(plan.projection.clone());
 
         let mut agg = aggm::Aggregator::new(&plan);
         self.for_each_row(table, filters, projection, |row| agg.feed(row))?;
 
-        Ok(agg.into_rows())
+        agg.into_rows()
+    }
+
+    /// `SELECT DISTINCT cols FROM table WHERE filters`.
+    ///
+    /// Default code path: streaming scan with projection limited to the
+    /// selected columns, deduplicating by hashing each projected row tuple
+    /// into a `HashSet<Vec<Value>>`. Row order in the result is unspecified.
+    fn distinct(
+        &mut self,
+        table: &str,
+        cols: Vec<String>,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Vec<Value>>> {
+        use std::collections::HashSet;
+
+        // Snapshot schema column names (drops the &mut borrow before
+        // re-entering `for_each_row`, which also borrows mutably).
+        let schema_cols: Vec<String> = {
+            let table_engine = self.get_table_mut(table)?;
+            let schema = table_engine.schema().ok_or_else(|| {
+                Error::InvalidOperation(
+                    "distinct requires table schema to be set".into()
+                )
+            })?;
+            schema.columns.iter().map(|c| c.name.clone()).collect()
+        };
+
+        // Resolve each requested column name to its position in the schema.
+        let proj_idxs: Vec<usize> = cols.iter().map(|name| {
+            schema_cols.iter().position(|c| c == name).ok_or_else(|| {
+                Error::Query(format!("distinct: unknown column `{}`", name))
+            })
+        }).collect::<Result<_>>()?;
+
+        let mut seen: HashSet<Vec<Value>> = HashSet::new();
+        let projection = Some(proj_idxs.clone());
+        let proj_len = proj_idxs.len();
+
+        self.for_each_row(table, filters, projection, |row| {
+            let key: Vec<Value> = (0..proj_len).map(|i| row[i].clone()).collect();
+            seen.insert(key);
+        })?;
+
+        Ok(seen.into_iter().collect())
     }
 }
 

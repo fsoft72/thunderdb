@@ -33,19 +33,32 @@ impl AggSlot {
     }
 
     /// Convert the accumulated slot into its final SQL-style `Value`.
-    fn finalize(self) -> Value {
-        match self {
-            AggSlot::Count(n) => Value::Int64(n as i64),
-            AggSlot::CountCol { non_null } => Value::Int64(non_null as i64),
+    /// Returns `Error::Query` for arithmetic overflow on Sum/Count.
+    fn finalize(self) -> Result<Value> {
+        Ok(match self {
+            AggSlot::Count(n) => {
+                let v = i64::try_from(n).map_err(|_| Error::Query(
+                    "aggregate: COUNT exceeds i64::MAX".into()))?;
+                Value::Int64(v)
+            }
+            AggSlot::CountCol { non_null } => {
+                let v = i64::try_from(non_null).map_err(|_| Error::Query(
+                    "aggregate: COUNT(col) exceeds i64::MAX".into()))?;
+                Value::Int64(v)
+            }
             AggSlot::Sum { has_value: false, .. } => Value::Null,
-            AggSlot::Sum { acc, .. } => Value::Int64(acc as i64),
+            AggSlot::Sum { acc, .. } => {
+                let v = i64::try_from(acc).map_err(|_| Error::Query(
+                    format!("aggregate: SUM overflow ({} exceeds i64 range)", acc)))?;
+                Value::Int64(v)
+            }
             AggSlot::Avg { n: 0, .. } => Value::Null,
             AggSlot::Avg { acc, n } => Value::Float64(acc as f64 / n as f64),
             AggSlot::Min { v: None } => Value::Null,
             AggSlot::Min { v: Some(x) } => x,
             AggSlot::Max { v: None } => Value::Null,
             AggSlot::Max { v: Some(x) } => x,
-        }
+        })
     }
 }
 
@@ -67,6 +80,7 @@ pub(crate) struct AggPlan {
 /// covering all referenced columns.
 pub(crate) fn plan(
     schema_cols: &[String],
+    schema_types: &[String],
     group_by: &[String],
     aggs: &[Aggregate],
 ) -> Result<AggPlan> {
@@ -87,6 +101,22 @@ pub(crate) fn plan(
         | Aggregate::Min(c)
         | Aggregate::Max(c) => lookup(c).map(Some),
     }).collect::<Result<_>>()?;
+
+    // Type-validate Sum/Avg: must reference an INT64 column. Fold-time
+    // would otherwise silently drop non-Int64 values, producing wrong totals.
+    for a in aggs {
+        let col = match a {
+            Aggregate::Sum(c) | Aggregate::Avg(c) => c.as_str(),
+            _ => continue,
+        };
+        let idx = schema_cols.iter().position(|c| c == col).unwrap();
+        if schema_types[idx] != "INT64" {
+            return Err(Error::Query(format!(
+                "aggregate: SUM/AVG requires INT64 column, `{}` is `{}`",
+                col, schema_types[idx]
+            )));
+        }
+    }
 
     let mut projection: Vec<usize> = Vec::new();
     for &k in &key_idxs {
@@ -165,17 +195,17 @@ pub(crate) fn fold_row(
 pub(crate) fn finalize(
     plan: &AggPlan,
     groups: HashMap<Vec<Value>, GroupState>,
-) -> Vec<AggRow> {
+) -> Result<Vec<AggRow>> {
     if plan.key_idxs.is_empty() && groups.is_empty() {
         let zero_state: GroupState = plan.agg_specs.iter().map(AggSlot::from_spec).collect();
-        return vec![AggRow {
-            keys: vec![],
-            aggs: zero_state.into_iter().map(AggSlot::finalize).collect(),
-        }];
+        let aggs: Vec<Value> = zero_state.into_iter()
+            .map(AggSlot::finalize).collect::<Result<_>>()?;
+        return Ok(vec![AggRow { keys: vec![], aggs }]);
     }
-    groups.into_iter().map(|(keys, state)| AggRow {
-        keys,
-        aggs: state.into_iter().map(AggSlot::finalize).collect(),
+    groups.into_iter().map(|(keys, state)| {
+        let aggs: Vec<Value> = state.into_iter()
+            .map(AggSlot::finalize).collect::<Result<_>>()?;
+        Ok(AggRow { keys, aggs })
     }).collect()
 }
 
@@ -198,7 +228,8 @@ impl<'a> Aggregator<'a> {
     }
 
     /// Consume the aggregator and produce the final result rows.
-    pub fn into_rows(self) -> Vec<AggRow> {
+    /// Propagates `Error::Query` on aggregate overflow at finalize time.
+    pub fn into_rows(self) -> Result<Vec<AggRow>> {
         finalize(self.plan, self.groups)
     }
 }
