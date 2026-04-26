@@ -449,8 +449,11 @@ pub fn build_empty_fixtures(tier: Tier, mode: Durability) -> Fixtures {
 }
 
 /// Build a single-table dataset (`blog_posts_q`) tuned for SP4a query
-/// scenarios: nullable `category` (~10% NULL), nullable `published_at`
-/// (~30% NULL), indexed `slug`, non-indexed `body`, non-indexed `views`.
+/// scenarios. Indexed columns: `id`, `author_id`, `title`, `slug`.
+/// Non-indexed: `body`, `category`, `published_at`, `views`. Nullable:
+/// `category` (~10% NULL), `published_at` (~30% NULL).
+///
+/// `users` table is not populated by this builder — single-table only.
 ///
 /// Both Thunder and SQLite are populated with identical row contents so
 /// per-scenario `.assert` callbacks can compare row counts byte-for-byte.
@@ -459,7 +462,7 @@ pub fn build_empty_fixtures(tier: Tier, mode: Durability) -> Fixtures {
 /// - `author_id = (i % 50) + 1`
 /// - `category = if i % 10 == 0 { NULL } else { CATEGORIES[i % 5] }`
 /// - `published_at = if i % 10 < 3 { NULL } else { 1_700_000_000 + i as i64 }`
-/// - `views = ((i * 2654435761) % 1_000_000) as i64`  (Knuth multiplicative hash)
+/// - `views = (i.wrapping_mul(2654435761)).rem_euclid(1_000_000)`  (Knuth multiplicative hash)
 /// - `slug = format!("post-{:08x}", i)`              (unique, lowercase ascii)
 pub fn build_blog_posts_q_fixtures(tier: Tier, mode: Durability) -> Fixtures {
     use rusqlite::params;
