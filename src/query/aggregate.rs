@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 /// Per-aggregate accumulator. One slot per element of the input `aggs`.
 #[derive(Debug, Clone)]
-enum AggSlot {
+pub(crate) enum AggSlot {
     Count(u64),
     CountCol { non_null: u64 },
     Sum { acc: i128, has_value: bool },
@@ -62,7 +62,7 @@ impl AggSlot {
     }
 }
 
-type GroupState = Vec<AggSlot>;
+pub(crate) type GroupState = Vec<AggSlot>;
 
 /// Pre-computed plan for an `aggregate()` execution: column resolution,
 /// projection list, and reverse mappings from group-by/aggregate inputs
@@ -104,12 +104,14 @@ pub(crate) fn plan(
 
     // Type-validate Sum/Avg: must reference an INT64 column. Fold-time
     // would otherwise silently drop non-Int64 values, producing wrong totals.
-    for a in aggs {
+    for (a, idx_opt) in aggs.iter().zip(agg_col_idxs.iter()) {
         let col = match a {
-            Aggregate::Sum(c) | Aggregate::Avg(c) => c.as_str(),
+            Aggregate::Sum(c) | Aggregate::Avg(c) => c,
             _ => continue,
         };
-        let idx = schema_cols.iter().position(|c| c == col).unwrap();
+        let idx = idx_opt.expect(
+            "Sum/Avg always have a column index per agg_col_idxs construction above",
+        );
         if schema_types[idx] != "INT64" {
             return Err(Error::Query(format!(
                 "aggregate: SUM/AVG requires INT64 column, `{}` is `{}`",
@@ -164,12 +166,16 @@ pub(crate) fn fold_row(
             (AggSlot::CountCol { non_null }, Aggregate::CountCol(_), Some(val)) => {
                 if !matches!(val, Value::Null) { *non_null += 1; }
             }
+            // AVG/SUM: non-Int64 values are unreachable here — plan() rejects non-INT64 columns at
+            // plan time. If that validation is ever loosened, this arm will silently drop rows.
             (AggSlot::Sum { acc, has_value }, Aggregate::Sum(_), Some(val)) => {
                 if let Value::Int64(x) = val {
                     *acc += *x as i128;
                     *has_value = true;
                 }
             }
+            // AVG/SUM: non-Int64 values are unreachable here — plan() rejects non-INT64 columns at
+            // plan time. If that validation is ever loosened, this arm will silently drop rows.
             (AggSlot::Avg { acc, n }, Aggregate::Avg(_), Some(val)) => {
                 if let Value::Int64(x) = val {
                     *acc += *x as i128;
