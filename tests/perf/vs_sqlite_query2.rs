@@ -10,7 +10,49 @@ use std::path::PathBuf;
 
 fn scenarios() -> Vec<Scenario> {
     vec![
-        // populated in Tasks 6..10
+        // Q10. COUNT(*) full table
+        Scenario::new("Q10. COUNT(*) full table", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Count], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let _: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Count], vec![]).unwrap();
+                let t = match r[0].aggs[0] { Value::Int64(n) => n, _ => -1 };
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+                if t != s { Err(format!("Q10 count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
+
+        // Q11. COUNT(*) WHERE author_id = 7  (indexed)
+        Scenario::new("Q11. COUNT(*) WHERE indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Count],
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int64(7)))]).unwrap();
+            })
+            .sqlite(|f| {
+                let _: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q WHERE author_id = 7", [], |r| r.get(0)).unwrap();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![], vec![Aggregate::Count],
+                    vec![Filter::new("author_id", Operator::Equals(Value::Int64(7)))]).unwrap();
+                let t = match r[0].aggs[0] { Value::Int64(n) => n, _ => -1 };
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q WHERE author_id = 7", [], |r| r.get(0)).unwrap();
+                if t != s { Err(format!("Q11 count: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
