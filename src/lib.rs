@@ -24,7 +24,7 @@ pub use error::{Error, Result};
 pub use storage::{Value, Row, TableEngine};
 use storage::page::value_at_page_bytes;
 pub use index::{IndexManager};
-pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, choose_index, apply_filters, multi_index_scan};
+pub use query::{Filter, Operator, DirectDataAccess, QueryBuilder, Aggregate, AggRow, choose_index, apply_filters, multi_index_scan};
 pub use parser::{parse_sql, Statement, PreparedCache};
 
 /// ThunderDB version
@@ -830,6 +830,43 @@ impl DirectDataAccess for Database {
             callback(&row.values);
         }
         Ok(n)
+    }
+
+    /// GROUP BY + aggregate over `table`, with optional WHERE `filters`.
+    ///
+    /// Default code path: full streaming scan via `for_each_row` (with
+    /// minimal projection covering only the columns referenced by
+    /// `group_by` and `aggs`), folding rows into a hash-grouped
+    /// accumulator. Indexed / cached fast paths will dispatch in front
+    /// of this in later tasks.
+    fn aggregate(
+        &mut self,
+        table: &str,
+        group_by: Vec<String>,
+        aggs: Vec<Aggregate>,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<AggRow>> {
+        use crate::query::aggregate as aggm;
+
+        // Snapshot the schema column names (drops the &mut borrow before
+        // we re-enter `for_each_row`, which also borrows mutably).
+        let schema_cols: Vec<String> = {
+            let table_engine = self.get_table_mut(table)?;
+            let schema = table_engine.schema().ok_or_else(|| {
+                Error::InvalidOperation(
+                    "aggregate requires table schema to be set".into()
+                )
+            })?;
+            schema.columns.iter().map(|c| c.name.clone()).collect()
+        };
+
+        let plan = aggm::plan(&schema_cols, &group_by, &aggs)?;
+        let projection = Some(plan.projection.clone());
+
+        let mut agg = aggm::Aggregator::new(&plan);
+        self.for_each_row(table, filters, projection, |row| agg.feed(row))?;
+
+        Ok(agg.into_rows())
     }
 }
 
