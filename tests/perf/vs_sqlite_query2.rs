@@ -97,6 +97,62 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+
+        // Q14. MIN/MAX over indexed PK
+        Scenario::new("Q14. MIN/MAX indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![],
+                    vec![Aggregate::Min("id".into()), Aggregate::Max("id".into())],
+                    vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let _: (i64, i64) = f.sqlite().query_row(
+                    "SELECT MIN(id), MAX(id) FROM blog_posts_q", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![],
+                    vec![Aggregate::Min("id".into()), Aggregate::Max("id".into())], vec![]).unwrap();
+                let (tmin, tmax) = match (&r[0].aggs[0], &r[0].aggs[1]) {
+                    (Value::Int64(a), Value::Int64(b)) => (*a, *b), _ => (-1, -1),
+                };
+                let (smin, smax): (i64, i64) = f.sqlite().query_row(
+                    "SELECT MIN(id), MAX(id) FROM blog_posts_q", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+                if (tmin, tmax) != (smin, smax) {
+                    Err(format!("Q14 minmax: thunder=({},{}), sqlite=({},{})", tmin, tmax, smin, smax))
+                } else { Ok(()) }
+            })
+            .build(),
+
+        // Q15. MIN/MAX over non-indexed views
+        Scenario::new("Q15. MIN/MAX non-indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![],
+                    vec![Aggregate::Min("views".into()), Aggregate::Max("views".into())],
+                    vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let _: (i64, i64) = f.sqlite().query_row(
+                    "SELECT MIN(views), MAX(views) FROM blog_posts_q", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec![],
+                    vec![Aggregate::Min("views".into()), Aggregate::Max("views".into())], vec![]).unwrap();
+                let (tmin, tmax) = match (&r[0].aggs[0], &r[0].aggs[1]) {
+                    (Value::Int64(a), Value::Int64(b)) => (*a, *b), _ => (-1, -1),
+                };
+                let (smin, smax): (i64, i64) = f.sqlite().query_row(
+                    "SELECT MIN(views), MAX(views) FROM blog_posts_q", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+                if (tmin, tmax) != (smin, smax) {
+                    Err(format!("Q15 minmax: thunder=({},{}), sqlite=({},{})", tmin, tmax, smin, smax))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
