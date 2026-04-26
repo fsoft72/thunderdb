@@ -318,18 +318,44 @@ where
     }
 
     /// Return the last `k` (key, value) pairs in DESCENDING key order.
-    /// Walks the entire forward leaf chain (no prev pointers); cheap
-    /// compared to row decoding because only (K, V) pairs are touched.
+    /// Walks the forward leaf chain (no prev pointers) but skips entries
+    /// before the tail window without cloning, then collects only the
+    /// last `k` keys+values.
     pub fn scan_last_k(&self, k: usize) -> Vec<(K, V)> {
         if k == 0 { return Vec::new(); }
-        let mut all = self.scan_all();
-        if all.len() <= k {
-            all.reverse();
-            return all;
+        let total = self.entry_count;
+        if total == 0 { return Vec::new(); }
+        let to_skip = total.saturating_sub(k);
+
+        let Some(first_id) = self.first_leaf_id else { return Vec::new(); };
+        let mut current_id = first_id;
+        let mut skipped = 0usize;
+        let mut out: Vec<(K, V)> = Vec::with_capacity(k.min(total));
+
+        loop {
+            let leaf = match self.nodes.get(current_id as usize) {
+                Some(n) => n,
+                None => break,
+            };
+            let leaf_len = leaf.keys.len();
+
+            if skipped + leaf_len <= to_skip {
+                skipped += leaf_len;
+            } else {
+                let start = to_skip.saturating_sub(skipped);
+                for i in start..leaf_len {
+                    out.push((leaf.keys[i].clone(), leaf.values[i].clone()));
+                }
+                skipped += leaf_len;
+            }
+
+            match leaf.next_leaf {
+                Some(next) => current_id = next,
+                None => break,
+            }
         }
-        let mut tail: Vec<(K, V)> = all.split_off(all.len() - k);
-        tail.reverse();
-        tail
+        out.reverse();
+        out
     }
 
     /// Get the number of entries in the tree — O(1)
