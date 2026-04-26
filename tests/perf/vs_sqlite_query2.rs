@@ -153,6 +153,109 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+
+        // Q16. GROUP BY indexed low-card
+        Scenario::new("Q16. GROUP BY indexed low-card", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec!["author_id".into()],
+                    vec![Aggregate::Count], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT author_id, COUNT(*) FROM blog_posts_q GROUP BY author_id").unwrap();
+                let _: Vec<(i64, i64)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+                    .map(|x| x.unwrap()).collect();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec!["author_id".into()],
+                    vec![Aggregate::Count], vec![]).unwrap();
+                let t_groups = r.len();
+                let t_total: i64 = r.iter().map(|row| match row.aggs[0] {
+                    Value::Int64(n) => n, _ => 0,
+                }).sum();
+                let s_groups: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT author_id FROM blog_posts_q GROUP BY author_id)",
+                    [], |r| r.get(0)).unwrap();
+                let s_total: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+                if t_groups as i64 != s_groups || t_total != s_total {
+                    Err(format!("Q16 groups: thunder=({},{}), sqlite=({},{})",
+                        t_groups, t_total, s_groups, s_total))
+                } else { Ok(()) }
+            })
+            .build(),
+
+        // Q17. GROUP BY non-indexed low-card (category, includes NULL group)
+        Scenario::new("Q17. GROUP BY non-indexed low-card", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec!["category".into()],
+                    vec![Aggregate::Count], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT category, COUNT(*) FROM blog_posts_q GROUP BY category").unwrap();
+                let _: Vec<(Option<String>, i64)> = st.query_map([],
+                    |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+                    .map(|x| x.unwrap()).collect();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec!["category".into()],
+                    vec![Aggregate::Count], vec![]).unwrap();
+                let t_groups = r.len();
+                let t_total: i64 = r.iter().map(|row| match row.aggs[0] {
+                    Value::Int64(n) => n, _ => 0,
+                }).sum();
+                let s_groups: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT category FROM blog_posts_q GROUP BY category)",
+                    [], |r| r.get(0)).unwrap();
+                let s_total: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+                if t_groups as i64 != s_groups || t_total != s_total {
+                    Err(format!("Q17 groups: thunder=({},{}), sqlite=({},{})",
+                        t_groups, t_total, s_groups, s_total))
+                } else { Ok(()) }
+            })
+            .build(),
+
+        // Q18. GROUP BY indexed + SUM
+        Scenario::new("Q18. GROUP BY + SUM", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec!["author_id".into()],
+                    vec![Aggregate::Sum("views".into())], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT author_id, SUM(views) FROM blog_posts_q GROUP BY author_id").unwrap();
+                let _: Vec<(i64, i64)> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+                    .map(|x| x.unwrap()).collect();
+            })
+            .assert(|f| {
+                let r = f.thunder_mut().aggregate(
+                    "blog_posts_q", vec!["author_id".into()],
+                    vec![Aggregate::Sum("views".into())], vec![]).unwrap();
+                let t_groups = r.len();
+                let t_total: i128 = r.iter().map(|row| match row.aggs[0] {
+                    Value::Int64(n) => n as i128, _ => 0,
+                }).sum();
+                let s_groups: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT author_id FROM blog_posts_q GROUP BY author_id)",
+                    [], |r| r.get(0)).unwrap();
+                let s_total: i64 = f.sqlite().query_row(
+                    "SELECT SUM(views) FROM blog_posts_q", [], |r| r.get(0)).unwrap();
+                if t_groups as i64 != s_groups || t_total != s_total as i128 {
+                    Err(format!("Q18 groups+sum: thunder=({},{}), sqlite=({},{})",
+                        t_groups, t_total, s_groups, s_total))
+                } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
