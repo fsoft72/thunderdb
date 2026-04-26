@@ -256,6 +256,52 @@ fn scenarios() -> Vec<Scenario> {
                 } else { Ok(()) }
             })
             .build(),
+
+        // Q19. DISTINCT high-card indexed (slug)
+        Scenario::new("Q19. DISTINCT high-card indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().distinct(
+                    "blog_posts_q", vec!["slug".into()], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT DISTINCT slug FROM blog_posts_q").unwrap();
+                let _: Vec<String> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().distinct(
+                    "blog_posts_q", vec!["slug".into()], vec![]).unwrap().len();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT slug FROM blog_posts_q)",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q19 distinct: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
+
+        // Q20. DISTINCT low-card non-indexed (category)
+        Scenario::new("Q20. DISTINCT low-card non-indexed", "query")
+            .setup(|t, m| build_blog_posts_q_fixtures(t, m))
+            .thunder(|f| {
+                let _ = f.thunder_mut().distinct(
+                    "blog_posts_q", vec!["category".into()], vec![]).unwrap();
+            })
+            .sqlite(|f| {
+                let mut st = f.sqlite().prepare(
+                    "SELECT DISTINCT category FROM blog_posts_q").unwrap();
+                let _: Vec<Option<String>> = st.query_map([], |r| r.get(0)).unwrap()
+                    .map(|r| r.unwrap()).collect();
+            })
+            .assert(|f| {
+                let t = f.thunder_mut().distinct(
+                    "blog_posts_q", vec!["category".into()], vec![]).unwrap().len();
+                let s: i64 = f.sqlite().query_row(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT category FROM blog_posts_q)",
+                    [], |r| r.get(0)).unwrap();
+                if t as i64 != s { Err(format!("Q20 distinct: thunder={}, sqlite={}", t, s)) } else { Ok(()) }
+            })
+            .build(),
     ]
 }
 
