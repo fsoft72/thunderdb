@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "git_sha": "7b9b0fc19983ece9b099265747df8cdcfeb4224e",
+  "git_sha": "fa323e20ac256e080e06152b3debae36ab5fb793",
   "rustc_version": "rustc 1.91.0 (f8297e351 2025-10-28)",
-  "started_at": "unix:1777195401",
+  "started_at": "unix:1777195450",
   "cells": [
     {
       "tier": "SMALL",
@@ -13,207 +13,207 @@
           "scenario": "Q10. COUNT(*) full table",
           "group": "query",
           "thunder": {
-            "median_ns": 71,
-            "p95_ns": 121,
+            "median_ns": 72,
+            "p95_ns": 124,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 2235,
+            "median_ns": 2144,
             "p95_ns": 2414,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 0.031767337807606266,
+          "ratio": 0.033582089552238806,
           "verdict": "Win"
         },
         {
           "scenario": "Q11. COUNT(*) WHERE indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1264,
-            "p95_ns": 1698,
+            "median_ns": 1202,
+            "p95_ns": 1607,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 5232,
-            "p95_ns": 5678,
+            "median_ns": 4936,
+            "p95_ns": 5508,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 0.2415902140672783,
+          "ratio": 0.24351701782820098,
           "verdict": "Win"
         },
         {
           "scenario": "Q12. SUM int non-indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1010024,
-            "p95_ns": 1065920,
+            "median_ns": 952805,
+            "p95_ns": 971656,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 248273,
-            "p95_ns": 322707,
+            "median_ns": 224638,
+            "p95_ns": 243248,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 4.068199119517628,
+          "ratio": 4.241513012046047,
           "verdict": "Loss"
         },
         {
           "scenario": "Q13. AVG int non-indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1014292,
-            "p95_ns": 1032461,
+            "median_ns": 961194,
+            "p95_ns": 999639,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 251109,
-            "p95_ns": 307630,
+            "median_ns": 231237,
+            "p95_ns": 265708,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 4.039249887499055,
+          "ratio": 4.156748271254168,
           "verdict": "Loss"
         },
         {
           "scenario": "Q14. MIN/MAX indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1103454,
-            "p95_ns": 1116540,
+            "median_ns": 1192,
+            "p95_ns": 3576,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 317802,
-            "p95_ns": 330194,
+            "median_ns": 294275,
+            "p95_ns": 302681,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 3.4721430324541696,
-          "verdict": "Loss"
+          "ratio": 0.004050632911392405,
+          "verdict": "Win"
         },
         {
           "scenario": "Q15. MIN/MAX non-indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1150277,
-            "p95_ns": 1188319,
+            "median_ns": 1007510,
+            "p95_ns": 1052182,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 437565,
-            "p95_ns": 501643,
+            "median_ns": 390812,
+            "p95_ns": 434481,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 2.6288140047764332,
+          "ratio": 2.5779914639263892,
           "verdict": "Loss"
         },
         {
           "scenario": "Q16. GROUP BY indexed low-card",
           "group": "query",
           "thunder": {
-            "median_ns": 1220664,
-            "p95_ns": 1243761,
+            "median_ns": 1152941,
+            "p95_ns": 1197174,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 248730,
-            "p95_ns": 303587,
+            "median_ns": 241811,
+            "p95_ns": 284627,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 4.907586539621276,
+          "ratio": 4.767942732133774,
           "verdict": "Loss"
         },
         {
           "scenario": "Q17. GROUP BY non-indexed low-card",
           "group": "query",
           "thunder": {
-            "median_ns": 1357834,
-            "p95_ns": 1370468,
+            "median_ns": 1256134,
+            "p95_ns": 1285607,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 1821543,
-            "p95_ns": 1852407,
+            "median_ns": 1689109,
+            "p95_ns": 1767766,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 0.7454306596111099,
+          "ratio": 0.7436666313423231,
           "verdict": "Win"
         },
         {
           "scenario": "Q18. GROUP BY + SUM",
           "group": "query",
           "thunder": {
-            "median_ns": 1364836,
-            "p95_ns": 1381868,
+            "median_ns": 1305888,
+            "p95_ns": 1327226,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 1581036,
-            "p95_ns": 1665566,
+            "median_ns": 1513196,
+            "p95_ns": 1577594,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 0.8632542206502571,
+          "ratio": 0.8629999021937673,
           "verdict": "Win"
         },
         {
           "scenario": "Q19. DISTINCT high-card indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1973256,
-            "p95_ns": 1989504,
+            "median_ns": 1864027,
+            "p95_ns": 1972305,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 953569,
-            "p95_ns": 977722,
+            "median_ns": 883579,
+            "p95_ns": 912297,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 2.0693374050540654,
+          "ratio": 2.1096325286137403,
           "verdict": "Loss"
         },
         {
           "scenario": "Q20. DISTINCT low-card non-indexed",
           "group": "query",
           "thunder": {
-            "median_ns": 1310909,
-            "p95_ns": 1356840,
+            "median_ns": 1221627,
+            "p95_ns": 1253415,
             "sample_count": 11,
             "dropped_outliers": 0
           },
           "sqlite": {
-            "median_ns": 479051,
-            "p95_ns": 560740,
+            "median_ns": 439588,
+            "p95_ns": 539948,
             "sample_count": 11,
             "dropped_outliers": 0
           },
-          "ratio": 2.736470647175353,
+          "ratio": 2.7790271799958144,
           "verdict": "Loss"
         }
       ]
     }
   ],
   "summary": {
-    "win": 4,
+    "win": 5,
     "tie": 0,
-    "loss": 7,
+    "loss": 6,
     "unsupported": 0,
     "failure": 0
   }

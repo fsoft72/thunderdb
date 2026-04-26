@@ -863,6 +863,53 @@ impl DirectDataAccess for Database {
             return Ok(vec![AggRow { keys: vec![], aggs: vec![Value::Int64(n_i64)] }]);
         }
 
+        // Fast path: global MIN/MAX over indexed columns, no filters.
+        // Each MIN/MAX collapses to a single B-tree endpoint lookup.
+        if group_by.is_empty()
+            && filters.is_empty()
+            && !aggs.is_empty()
+            && aggs.iter().all(|a| matches!(a, Aggregate::Min(_) | Aggregate::Max(_)))
+        {
+            // Verify all referenced columns are indexed.
+            let all_indexed = {
+                let tbl = self.get_table_mut(table)?;
+                aggs.iter().all(|a| {
+                    let col = match a {
+                        Aggregate::Min(c) | Aggregate::Max(c) => c,
+                        _ => unreachable!(),
+                    };
+                    tbl.index_manager().has_index(col)
+                })
+            };
+            if all_indexed {
+                // Snapshot schema column ordering once for index lookup.
+                let schema_cols: Vec<String> = {
+                    let tbl = self.get_table_mut(table)?;
+                    let s = tbl.schema().ok_or_else(|| {
+                        Error::InvalidOperation(
+                            format!("aggregate: table `{}` has no schema", table)
+                        )
+                    })?;
+                    s.columns.iter().map(|c| c.name.clone()).collect()
+                };
+                let mut out = Vec::with_capacity(aggs.len());
+                for a in &aggs {
+                    let (col, want_max) = match a {
+                        Aggregate::Min(c) => (c, false),
+                        Aggregate::Max(c) => (c, true),
+                        _ => unreachable!(),
+                    };
+                    let rows = self.scan_indexed_top_k(table, col, 1, want_max)?;
+                    let v = rows.first().and_then(|r| {
+                        let idx = schema_cols.iter().position(|c| c == col)?;
+                        r.values.get(idx).cloned()
+                    }).unwrap_or(Value::Null);
+                    out.push(v);
+                }
+                return Ok(vec![AggRow { keys: vec![], aggs: out }]);
+            }
+        }
+
         // Snapshot the schema column names + types (drops the &mut borrow
         // before re-entering `for_each_row`, which also borrows mutably).
         let (schema_cols, schema_types): (Vec<String>, Vec<String>) = {
